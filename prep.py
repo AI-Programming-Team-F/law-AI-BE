@@ -16,7 +16,8 @@ def get_summary(BILL_NO : str) -> str:
     if status_code == 200:
         print("요청 성공(HTTP 200)")
         try:
-            return response['BPMBILLSUMMARY'][1]['row'][0]['SUMMARY']
+            summary = response['BPMBILLSUMMARY'][1]['row'][0]['SUMMARY']
+            return summary
         except ValueError as e:
             print("JSON 파싱 실패! 실제 반환된 응답 텍스트:")
             print(response)
@@ -39,7 +40,6 @@ def get_bills(age: int, page_size: int, page_index: int) -> dict | None:
     if status_code == 200:
         print("요청 성공(HTTP 200)")
         try:
-            print("응답 데이터:")
             result = response['nzmimeepazxkubdpn'][1]['row']
         except ValueError as e:
             print("JSON 파싱 실패! 실제 반환된 응답 텍스트:")
