@@ -10,7 +10,8 @@ def main():
     okt = Okt()
 
     # 의안 번호 가져오기
-    bills = prep.get_bills(22, 20, 1)
+    size = 100
+    bills = prep.get_bills(22, size, 1)
     if bills is None:
         print('뭔가 잘못됨')
         return
@@ -22,15 +23,16 @@ def main():
     df['SUMMARY'] = df['BILL_NO'].apply(prep.get_summary)
 
     # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
-    stopwords = ['제안', '참고', '이유', '내용', '현행법', '개정', '법률']
-    df['NOUNS'] = df['SUMMARY'].fillna('').apply(okt.nouns).apply(lambda nouns: list(filter(lambda x: x not in stopwords and len(x) > 1, nouns)))
-    df['NOUNS'].explode().value_counts() # 빈도수 순으로 정렬
+    df['NOUNS'] = df['SUMMARY'].fillna('').apply(okt.nouns)
+    stopwords = list(df['NOUNS'].explode().value_counts().head(20).keys())
+    for x in ['제안', '이유', '현행법', '최근']: stopwords.append(x)
+    print(stopwords)
+    df['NOUNS'] = df['NOUNS'].apply(lambda nouns: list(filter(lambda x: x not in stopwords and len(x) > 1, nouns)))
 
     # 없는 행 삭제
     df = df[df['SUMMARY'].notna() & (df['NOUNS'].str.len() > 0)]
 
     # 출력
-    print(df['SUMMARY'])
     print(df['NOUNS'])
 
 # 실행부

@@ -14,7 +14,6 @@ def get_summary(BILL_NO : str) -> str:
     })
 
     if status_code == 200:
-        print("요청 성공(HTTP 200)")
         try:
             summary = response['BPMBILLSUMMARY'][1]['row'][0]['SUMMARY']
             return summary
