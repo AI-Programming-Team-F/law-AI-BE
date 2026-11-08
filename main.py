@@ -3,6 +3,7 @@ import pandas
 from konlpy.tag import Okt
 
 import prep
+import w2v
 
 load_dotenv()
 
@@ -32,8 +33,13 @@ def main():
     # 없는 행 삭제
     df = df[df['SUMMARY'].notna() & (df['NOUNS'].str.len() > 0)]
 
+    # 단어 사전 생성
+    df, word2id, id2word = w2v.build_vocab(df, min_count=3)
+
     # 출력
-    print(df['NOUNS'])
+    print(df[['NOUNS', 'IDS']])
+    print(f'사전 단어 수: {len(word2id)}')
+    print('상위 20개:', list(word2id.items())[:20])
 
 # 실행부
 if __name__ == '__main__':
