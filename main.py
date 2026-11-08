@@ -1,46 +1,26 @@
 from dotenv import load_dotenv
-import pandas
-from konlpy.tag import Okt
-
-import log
-import prep
-import w2v
 
 load_dotenv()
 
-def main(size: int = 2000):
-    log.step('형태소 분석기(Okt) 로딩')
-    okt = Okt()
+from fastapi import FastAPI
 
-    # 의안 번호 가져오기
-    log.step(f'의안 목록 수집 시작 (목표 {size}건)')
-    bills = prep.get_bills_many(22, size)
-    if bills is None:
-        print('뭔가 잘못됨')
-        return
-    log.step(f'의안 목록 수집 완료 ({len(bills)}건)')
+from data import data
 
-    # pandas DataFrame으로 변환 (필요한 열만 선택)
-    df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO']]
+app = FastAPI()
 
-    # 의안 번호마다 요약본 추출
-    df['SUMMARY'] = df['BILL_NO'].apply(log.with_progress(prep.get_summary, len(df), '요약본 수집'))
+# 데이터 수집·전처리 시작 (백그라운드에서 진행되며, 이미 진행 중이면 새로 시작하지 않음)
+@app.get('/preprocess')
+def preprocess(size: int = 2000):
+    started = data.start_preprocess(size)
+    return {'started': started, 'status': data.status, 'error': data.error}
 
-    # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
-    df['NOUNS'] = df['SUMMARY'].fillna('').apply(log.with_progress(okt.nouns, len(df), '명사 추출'))
-    stopwords = list(df['NOUNS'].explode().value_counts().head(20).keys())
-    for x in ['제안', '이유', '현행법', '최근']: stopwords.append(x)
-    df['NOUNS'] = df['NOUNS'].apply(lambda nouns: list(filter(lambda x: x not in stopwords and len(x) > 1, nouns)))
+# 검색 (전처리가 끝나기 전에는 data가 빈 리스트)
+@app.get('/search')
+def search(query: str, limit: int = 20):
+    return {'preprocess': data.is_ready, 'data': data.search(query, limit)}
 
-    # 없는 행 삭제
-    before = len(df)
-    df = df[df['SUMMARY'].notna() & (df['NOUNS'].str.len() > 0)]
-    log.step(f'요약본/명사 없는 행 삭제: {before}건 → {len(df)}건')
-
-    # 단어 사전 생성
-    df, word2id, id2word = w2v.build_vocab(df, min_count=3)
-    log.step('단어 사전 생성 완료')
-
-# 실행부
+# 실행부 (python main.py)
 if __name__ == '__main__':
-    main()
+    import os
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=int(os.getenv('PORT', 8000)))

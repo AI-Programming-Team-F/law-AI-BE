@@ -16,4 +16,4 @@ COPY . .
 # 로그가 버퍼에 쌓이지 않고 바로 출력되도록
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "main.py"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
