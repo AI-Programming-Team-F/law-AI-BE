@@ -23,6 +23,7 @@ class Data:
                 instance._id2word = {}
                 instance._status = 'idle'      # idle | running | done | failed
                 instance._error = None
+                instance._fetched = 0          # 요약본 수집 진행률 (%)
                 instance._run_lock = threading.Lock()
                 cls._instance = instance
         return cls._instance
@@ -42,6 +43,11 @@ class Data:
     @property
     def error(self) -> str | None:
         return self._error
+
+    # 요약본 수집 진행률 (0~100, 단위: %)
+    @property
+    def fetched(self) -> int:
+        return self._fetched
 
     # DataFrame (복사본을 돌려주므로 밖에서 수정해도 내부 데이터는 바뀌지 않음)
     @property
@@ -64,6 +70,11 @@ class Data:
         if not self._run_lock.acquire(blocking=False):
             return False
 
+        # 스레드가 시작되기 전에 상태를 바꿔 둬야 바로 반환되는 응답에도 반영됨
+        self._status = 'running'
+        self._error = None
+        self._fetched = 0
+
         def run():
             try:
                 self._preprocess(size)
@@ -76,8 +87,6 @@ class Data:
     # 수집 → 명사 추출 → 불용어 제거 → 단어 사전 생성
     # 끝까지 성공했을 때만 내부 데이터를 한 번에 교체한다 (진행 중에도 기존 데이터로 검색 가능)
     def _preprocess(self, size: int) -> None:
-        self._status = 'running'
-        self._error = None
         try:
             log.step('형태소 분석기(Okt) 로딩')
             okt = Okt()
@@ -93,7 +102,17 @@ class Data:
             df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO']]
 
             # 의안 번호마다 요약본 추출
-            df['SUMMARY'] = df['BILL_NO'].apply(log.with_progress(prep.get_summary, len(df), '요약본 수집'))
+            total = len(df)
+            count = 0
+
+            def fetch_summary(bill_no: str) -> str | None:
+                nonlocal count
+                summary = prep.get_summary(bill_no)
+                count += 1
+                self._fetched = count * 100 // total
+                return summary
+
+            df['SUMMARY'] = df['BILL_NO'].apply(log.with_progress(fetch_summary, total, '요약본 수집'))
 
             # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
             df['NOUNS'] = df['SUMMARY'].fillna('').apply(log.with_progress(okt.nouns, len(df), '명사 추출'))

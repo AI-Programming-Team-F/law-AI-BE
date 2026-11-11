@@ -21,6 +21,7 @@ app = FastAPI(
 class PreprocessResponse(BaseModel):
     started: bool = Field(description='이번 호출로 수집을 새로 시작했는지 (이미 진행 중이면 false)')
     status: Literal['idle', 'running', 'done', 'failed'] = Field(description='전처리 상태')
+    fetched: int = Field(ge=0, le=100, description='요약본 수집 진행률 (단위: %, 0~100)')
     error: str | None = Field(description='실패했을 때의 오류 메시지')
 
 class Bill(BaseModel):
@@ -46,7 +47,7 @@ class SearchResponse(BaseModel):
 )
 def preprocess(size: int = Query(2000, ge=1, description='수집할 법률안 수 (최신순)')):
     started = data.start_preprocess(size)
-    return {'started': started, 'status': data.status, 'error': data.error}
+    return {'started': started, 'status': data.status, 'fetched': data.fetched, 'error': data.error}
 
 @app.get(
     '/search',
