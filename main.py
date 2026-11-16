@@ -40,6 +40,7 @@ class PreprocessResponse(BaseModel):
 class Bill(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
     BILL_NAME: str = Field(description='법률안 이름')
+    PROC_RESULT: str | None = Field(description='본회의심의결과')
     SUMMARY: str = Field(description='요약본 (제안이유 및 주요내용)')
     SCORE: int = Field(description='관련도 (높을수록 관련 있음)')
 

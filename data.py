@@ -99,7 +99,7 @@ class Data:
             log.step(f'의안 목록 수집 완료 ({len(bills)}건)')
 
             # pandas DataFrame으로 변환 (필요한 열만 선택)
-            df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO']]
+            df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO', 'PROC_RESULT']]
 
             # 의안 번호마다 요약본 추출
             total = len(df)
@@ -132,9 +132,6 @@ class Data:
             # 완성된 데이터로 한 번에 교체
             self._df, self._word2id, self._id2word = df, word2id, id2word
             self._status = 'done'
-
-            log.step(f'DataFrame 메모리: {df.memory_usage(deep=True).sum() / 1024 / 1024:.1f} MB')
-            log.step(f'최대 메모리 사용량(프로세스 전체, JVM 포함): {log.peak_memory_mb():.1f} MB')
         except Exception as e:
             self._status = 'failed'
             self._error = str(e)
@@ -142,9 +139,6 @@ class Data:
 
     # ---------- 검색 ----------
 
-    # TODO: Word2Vec 학습 후 유사 키워드 확장 / 의미 기반 검색으로 교체
-    # 지금은 임시로, 검색어가 법률안 이름이나 요약본에 들어 있는 법안을 찾는다.
-    # 법률안 이름에 들어 있으면 더 위에 오도록 점수를 매긴다.
     # 의안 번호로 원문 요약본(제안이유 및 주요내용) 찾기
     # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다.
     def get_summary(self, bill_no: str) -> str | None:
@@ -155,6 +149,9 @@ class Data:
                 return row.iloc[0]
         return prep.get_summary(bill_no)
 
+    # TODO: Word2Vec 학습 후 유사 키워드 확장 / 의미 기반 검색으로 교체
+    # 지금은 임시로, 검색어가 법률안 이름이나 요약본에 들어 있는 법안을 찾는다.
+    # 법률안 이름에 들어 있으면 더 위에 오도록 점수를 매긴다.
     def search(self, query: str, limit: int = 20) -> list[dict]:
         df = self._df
         if df is None or not query.strip():
@@ -168,7 +165,12 @@ class Data:
 
         result = df.assign(SCORE=score)
         result = result[result['SCORE'] > 0].sort_values('SCORE', ascending=False).head(limit)
-        return result[['BILL_NO', 'BILL_NAME', 'SUMMARY', 'SCORE']].to_dict(orient='records')
+        result = result[['BILL_NO', 'BILL_NAME', 'PROC_RESULT', 'SUMMARY', 'SCORE']]
+
+        # pandas는 빈 값을 NaN으로 표시하지만 JSON에는 NaN이 없으므로 None(null)으로 바꾼다.
+        # (str 열은 None을 담을 수 없어서 object 타입으로 바꾼 뒤 교체)
+        result = result.astype(object).where(result.notna(), None)
+        return result.to_dict(orient='records')
 
 
 # 전체에서 사용하는 단일 인스턴스
