@@ -145,6 +145,16 @@ class Data:
     # TODO: Word2Vec 학습 후 유사 키워드 확장 / 의미 기반 검색으로 교체
     # 지금은 임시로, 검색어가 법률안 이름이나 요약본에 들어 있는 법안을 찾는다.
     # 법률안 이름에 들어 있으면 더 위에 오도록 점수를 매긴다.
+    # 의안 번호로 원문 요약본(제안이유 및 주요내용) 찾기
+    # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다.
+    def get_summary(self, bill_no: str) -> str | None:
+        df = self._df
+        if df is not None:
+            row = df.loc[df['BILL_NO'] == bill_no, 'SUMMARY']
+            if not row.empty:
+                return row.iloc[0]
+        return prep.get_summary(bill_no)
+
     def search(self, query: str, limit: int = 20) -> list[dict]:
         df = self._df
         if df is None or not query.strip():
