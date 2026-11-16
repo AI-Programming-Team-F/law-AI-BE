@@ -2,9 +2,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import os
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import ai
@@ -15,6 +17,16 @@ app = FastAPI(
     description='22대 국회 법률안을 수집해 메모리에 적재하고 검색한다. '
                 '서버 시작 후 `/preprocess`를 먼저 호출해야 검색 결과가 나온다.',
     version='0.1.0',
+)
+
+# CORS: 쉼표로 구분한 출처 목록 (예: ALLOWED_ORIGINS=http://localhost:5173,https://law-ai.vercel.app)
+# 설정하지 않으면 어떤 출처도 허용하지 않는다.
+allowed_origins = [o.strip().rstrip('/') for o in os.getenv('ALLOWED_ORIGINS', '').split(',') if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_methods=['GET'],
+    allow_headers=['*'],
 )
 
 # ---------- 응답 형식 ----------
@@ -89,6 +101,5 @@ def summary(bill_no: str = Query(description='의안 번호', examples=['2222564
 
 # 실행부 (python main.py)
 if __name__ == '__main__':
-    import os
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=int(os.getenv('PORT', 8000)))
