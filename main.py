@@ -47,6 +47,16 @@ class SummaryResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
     summary: str = Field(description='AI가 쉽게 풀어 쓴 요약')
 
+class CompareResponse(BaseModel):
+    a_bill_no: str = Field(description='비교할 법률안 A의 의안 번호')
+    b_bill_no: str = Field(description='비교할 법률안 B의 의안 번호')
+    differences: list[tuple[str, str]] = Field(
+        description='두 법률안의 차이점. 각 원소는 [A, B] 형태이며, 유사한 주제에 대한 '
+                    '법률안 A의 내용과 법률안 B의 내용을 나란히 표시한다. (개괄식)',
+        examples=[[['소방공무원 인건비에 대한 국가 재정부담 확대를 목표로 함',
+                    '소방발전기금 신설을 통한 소방재정 확충을 목표로 함']]],
+    )
+
 class SearchResponse(BaseModel):
     preprocess: bool = Field(description='검색할 데이터가 준비되었는지 (false면 data는 항상 빈 리스트)')
     data: list[Bill] = Field(description='검색 결과 (관련도 높은 순)')
@@ -98,6 +108,37 @@ def summary(bill_no: str = Query(description='의안 번호', examples=['2222564
         return {'bill_no': bill_no, 'summary': ai.summarize(text)}
     except Exception as e:
         raise HTTPException(502, str(e))
+
+@app.get(
+    '/compare',
+    response_model=CompareResponse,
+    summary='두 법률안 AI 비교',
+    description='두 법률안의 제안이유 및 주요내용을 AI로 비교해, 차이점을 리스트로 돌려준다.\n\n'
+                '- `differences`의 각 원소는 `[A, B]` 형태로 표시한다.\n'
+                '- 각 원소는 유사한 주제에 대한 두 법률안의 차이이다. '
+                '`A`는 그 주제에서 법률안 A의 내용, `B`는 법률안 B의 내용이다.\n'
+                '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
+                '- `/preprocess` 없이도 사용할 수 있다.',
+    responses={400: {'description': '같은 법률안끼리 비교함'},
+               404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
+               502: {'description': 'AI 요청 실패'}},
+)
+def compare(
+    a_bill_no: str = Query(description='법률안 A의 의안 번호', examples=['2222564']),
+    b_bill_no: str = Query(description='법률안 B의 의안 번호', examples=['2222562']),
+):
+    if a_bill_no == b_bill_no:
+        raise HTTPException(400, '서로 다른 법률안을 입력해야 합니다.')
+    texts = {}
+    for bill_no in (a_bill_no, b_bill_no):
+        texts[bill_no] = data.get_summary(bill_no)
+        if not texts[bill_no]:
+            raise HTTPException(404, f'법률안 {bill_no}의 요약본이 없습니다.')
+    try:
+        differences = ai.compare(texts[a_bill_no], texts[b_bill_no])
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    return {'a_bill_no': a_bill_no, 'b_bill_no': b_bill_no, 'differences': differences}
 
 # 실행부 (python main.py)
 if __name__ == '__main__':
