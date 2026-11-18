@@ -65,3 +65,22 @@ def get_bills_many(age: int, total: int, page_size: int = 1000) -> list | None:
             break
 
     return result[:total]
+
+# 의안 번호로 법률안 하나 불러오기 (없으면 None)
+def get_bill(age: int, bill_no: str) -> dict | None:
+    status_code, response = req.request(req.LEGISLATIVE_BILL, {
+            'KEY': os.getenv('KEY'),
+            'Type': 'json',
+            'pIndex': 1,
+            'pSize': 1,
+            'AGE': age,
+            'BILL_NO': bill_no
+        })
+
+    if status_code != 200:
+        print(f"\n요청 실패 (의안 번호: {bill_no}, 상태 코드: {status_code})")
+        return None
+    try:
+        return response['nzmimeepazxkubdpn'][1]['row'][0]
+    except (KeyError, IndexError):
+        return None  # 해당하는 데이터 없음

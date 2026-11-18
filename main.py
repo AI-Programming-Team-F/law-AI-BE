@@ -37,12 +37,14 @@ class PreprocessResponse(BaseModel):
     fetched: int = Field(ge=0, le=100, description='요약본 수집 진행률 (단위: %, 0~100)')
     error: str | None = Field(description='실패했을 때의 오류 메시지')
 
-class Bill(BaseModel):
+class BillInfo(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
     BILL_NAME: str = Field(description='법률안 이름')
     COMMITTEE: str | None = Field(description='소관위원회 (아직 회부되지 않았으면 null)')
     PROC_RESULT: str | None = Field(description='본회의심의결과')
-    SUMMARY: str = Field(description='요약본 (제안이유 및 주요내용)')
+    SUMMARY: str | None = Field(description='요약본 (제안이유 및 주요내용, 아직 등록되지 않았으면 null)')
+
+class Bill(BillInfo):
     SCORE: float = Field(ge=0, le=1, description='관련도 (0~1, 높을수록 관련 있음)')
 
 class SummaryResponse(BaseModel):
@@ -69,6 +71,10 @@ class CompareResponse(BaseModel):
 class SearchResponse(BaseModel):
     preprocess: bool = Field(description='검색할 데이터가 준비되었는지 (false면 data는 항상 빈 리스트)')
     data: list[Bill] = Field(description='검색 결과 (관련도 높은 순)')
+
+class BillNoResponse(BaseModel):
+    preprocess: bool = Field(description='전처리한 데이터가 준비되었는지 (false여도 국회 API에서 바로 찾음)')
+    data: BillInfo = Field(description='찾은 법률안')
 
 # ---------- 엔드포인트 ----------
 
@@ -99,10 +105,20 @@ def search(
 ):
     return {'preprocess': data.is_ready, 'data': data.search(query, limit)}
 
-#TODO
-@app.get('/search/billno')
-def search_billno():
-    pass
+@app.get(
+    '/search/billno',
+    response_model=BillNoResponse,
+    summary='의안 번호로 법률안 조회',
+    description='의안 번호가 정확히 일치하는 법률안 하나를 돌려준다.\n\n'
+                '- 전처리한 데이터에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다.\n'
+                '- `/preprocess` 없이도 사용할 수 있다.',
+    responses={404: {'description': '해당 의안 번호의 법률안이 없음'}},
+)
+def search_billno(billno: str = Query(description='의안 번호', examples=['2222564'])):
+    bill = data.get_bill(billno.strip())
+    if bill is None:
+        raise HTTPException(404, '해당 의안 번호의 법률안이 없습니다.')
+    return {'preprocess': data.is_ready, 'data': bill}
 
 @app.get(
     '/summary',

@@ -162,6 +162,23 @@ class Data:
                 return row.iloc[0]
         return prep.get_summary(bill_no)
 
+    # 의안 번호로 법률안 하나 찾기 (없으면 None)
+    # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다. (요약본이 아직 없으면 SUMMARY는 None)
+    BILL_COLUMNS = ['BILL_NO', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY']
+
+    def get_bill(self, bill_no: str) -> dict | None:
+        df = self._df
+        if df is not None:
+            row = df.loc[df['BILL_NO'] == bill_no, self.BILL_COLUMNS]
+            if not row.empty:
+                return _to_records(row)[0]
+
+        bill = prep.get_bill(22, bill_no)
+        if bill is None:
+            return None
+        bill['SUMMARY'] = prep.get_summary(bill_no)
+        return {column: bill.get(column) for column in self.BILL_COLUMNS}
+
     # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
     # - 검색어 단어: Okt로 뽑은 명사 (예: "월세가 너무 비싸" → ["월세"])
     # - 키워드 점수: 검색어 단어가 법률안 이름에 있으면 2, 요약본에 있으면 1을 더한 뒤 최대값(3 × 단어 수)으로 나눔
@@ -202,12 +219,14 @@ class Data:
 
         result = df.assign(SCORE=score.round(4))[matched]
         result = result.sort_values('SCORE', ascending=False, kind='stable').head(limit)  # 같은 점수면 최신순 유지
-        result = result[['BILL_NO', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY', 'SCORE']]
+        return _to_records(result[self.BILL_COLUMNS + ['SCORE']])
 
-        # pandas는 빈 값을 NaN으로 표시하지만 JSON에는 NaN이 없으므로 None(null)으로 바꾼다.
-        # (str 열은 None을 담을 수 없어서 object 타입으로 바꾼 뒤 교체)
-        result = result.astype(object).where(result.notna(), None)
-        return result.to_dict(orient='records')
+
+# DataFrame → dict 리스트
+# pandas는 빈 값을 NaN으로 표시하지만 JSON에는 NaN이 없으므로 None(null)으로 바꾼다.
+# (str 열은 None을 담을 수 없어서 object 타입으로 바꾼 뒤 교체)
+def _to_records(df: pandas.DataFrame) -> list[dict]:
+    return df.astype(object).where(df.notna(), None).to_dict(orient='records')
 
 
 # 전체에서 사용하는 단일 인스턴스
