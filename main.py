@@ -40,6 +40,7 @@ class PreprocessResponse(BaseModel):
 class Bill(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
     BILL_NAME: str = Field(description='법률안 이름')
+    COMMITTEE: str | None = Field(description='소관위원회 (아직 회부되지 않았으면 null)')
     PROC_RESULT: str | None = Field(description='본회의심의결과')
     SUMMARY: str = Field(description='요약본 (제안이유 및 주요내용)')
     SCORE: float = Field(ge=0, le=1, description='관련도 (0~1, 높을수록 관련 있음)')
@@ -47,6 +48,13 @@ class Bill(BaseModel):
 class SummaryResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
     summary: str = Field(description='AI가 쉽게 풀어 쓴 요약')
+
+class HappenResponse(BaseModel):
+    bill_no: str = Field(description='의안 번호')
+    happens: list[tuple[str, str]] = Field(
+        description='법률안이 시행되면 생기는 일. 각 원소는 [대상, 변화] 형태이다. (개괄식)',
+        examples=[[['월세 사는 청년', '월세 세액공제를 더 많이 받게 됨']]],
+    )
 
 class CompareResponse(BaseModel):
     a_bill_no: str = Field(description='비교할 법률안 A의 의안 번호')
@@ -146,6 +154,27 @@ def compare(
     except Exception as e:
         raise HTTPException(502, str(e))
     return {'a_bill_no': a_bill_no, 'b_bill_no': b_bill_no, 'differences': differences}
+
+@app.get(
+    '/happen',
+    response_model=HappenResponse,
+    summary='법률안이 시행되면 나에게 생기는 일',
+    description='법률안의 제안이유 및 주요내용을 AI로 분석해, 시행되면 누구에게 어떤 일이 생기는지 돌려준다.\n\n'
+                '- `happens`의 각 원소는 `[대상, 변화]` 형태로 표시한다. (예: `["월세 사는 청년", "월세 세액공제를 더 많이 받게 됨"]`)\n'
+                '- 일반 시민에게 생기는 일이 앞에 온다.\n'
+                '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
+                '- `/preprocess` 없이도 사용할 수 있다.',
+    responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
+               502: {'description': 'AI 요청 실패'}},
+)
+def happen(bill_no: str = Query(description='의안 번호', examples=['2222564'])):
+    text = data.get_summary(bill_no)
+    if not text:
+        raise HTTPException(404, '해당 법률안의 요약본이 없습니다.')
+    try:
+        return {'bill_no': bill_no, 'happens': ai.happen(text)}
+    except Exception as e:
+        raise HTTPException(502, str(e))
 
 # 실행부 (python main.py)
 if __name__ == '__main__':

@@ -104,7 +104,7 @@ class Data:
             log.step(f'의안 목록 수집 완료 ({len(bills)}건)')
 
             # pandas DataFrame으로 변환 (필요한 열만 선택)
-            df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO', 'PROC_RESULT']]
+            df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO', 'COMMITTEE', 'PROC_RESULT']]
 
             # 의안 번호마다 요약본 추출
             total = len(df)
@@ -202,7 +202,7 @@ class Data:
 
         result = df.assign(SCORE=score.round(4))[matched]
         result = result.sort_values('SCORE', ascending=False, kind='stable').head(limit)  # 같은 점수면 최신순 유지
-        result = result[['BILL_NO', 'BILL_NAME', 'PROC_RESULT', 'SUMMARY', 'SCORE']]
+        result = result[['BILL_NO', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY', 'SCORE']]
 
         # pandas는 빈 값을 NaN으로 표시하지만 JSON에는 NaN이 없으므로 None(null)으로 바꾼다.
         # (str 열은 None을 담을 수 없어서 object 타입으로 바꾼 뒤 교체)

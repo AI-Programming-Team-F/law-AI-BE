@@ -56,6 +56,44 @@ COMPARE_FORMAT = {
     },
 }
 
+HAPPEN_PROMPT = (
+    '너는 대한민국 국회 법률안을 일반 시민에게 설명하는 도우미다. '
+    '법률안의 제안이유 및 주요내용을 읽고, 이 법률안이 시행되면 사람들에게 실제로 생기는 일을 정리하라. '
+    '항목 하나당 영향을 받는 대상(target)과 그 대상에게 생기는 변화(change)를 쓰고, 2~5개 항목을 작성하라. '
+    'target은 "월세 사는 청년", "어린이집 원장"처럼 누구인지 바로 알 수 있는 짧은 명사구로, '
+    'change는 개괄식(명사형 종결, 예: "월세 세액공제를 더 많이 받게 됨")으로 쉬운 한국어 60자 미만으로 쓴다. '
+    '일반 시민에게 생기는 일을 먼저 쓰고, 원문에 없는 내용은 추가하지 마라.'
+)
+
+# 생기는 일 구조화된 출력 형식: {"happens": [{"target": "...", "change": "..."}, ...]}
+HAPPEN_FORMAT = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'bill_happen',
+        'strict': True,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'happens': {
+                    'type': 'array',
+                    'description': '법률안이 시행되면 생기는 일 (항목당 하나)',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'target': {'type': 'string', 'description': '영향을 받는 대상'},
+                            'change': {'type': 'string', 'description': '그 대상에게 생기는 변화 (개괄식)'},
+                        },
+                        'required': ['target', 'change'],
+                        'additionalProperties': False,
+                    },
+                },
+            },
+            'required': ['happens'],
+            'additionalProperties': False,
+        },
+    },
+}
+
 # 같은 내용에는 같은 답을 돌려주기 위한 캐시 (요청 내용 해시 → 결과)
 # temperature=0이어도 LLM 응답이 완전히 같다는 보장은 없으므로 한 번 만든 결과를 재사용한다.
 _cache: dict[str, object] = {}
@@ -115,3 +153,15 @@ def compare(a_text: str, b_text: str) -> list[list[str]]:
             raise RuntimeError(f'AI 응답 형식 오류: {content[:200]}')
 
     return _cached('compare\0' + a_text + '\0' + b_text, make)
+
+# 법률안이 시행되면 생기는 일 → 리스트, 각 원소는 [대상, 변화] (개괄식)
+# 실패하면 RuntimeError
+def happen(text: str) -> list[list[str]]:
+    def make() -> list[list[str]]:
+        content = _chat(HAPPEN_PROMPT, text, HAPPEN_FORMAT)
+        try:
+            return [[str(x['target']).strip(), str(x['change']).strip()] for x in json.loads(content)['happens']]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            raise RuntimeError(f'AI 응답 형식 오류: {content[:200]}')
+
+    return _cached('happen\0' + text, make)
