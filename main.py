@@ -25,7 +25,7 @@ allowed_origins = [o.strip().rstrip('/') for o in os.getenv('ALLOWED_ORIGINS', '
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_methods=['GET'],
+    allow_methods=['GET', 'POST'],
     allow_headers=['*'],
 )
 
@@ -62,12 +62,33 @@ class ProfileResponse(BaseModel):
                                examples=[['무주택 세대주', '근로자']])
     criteria: list[ProfileCriterion] = Field(description='적용 여부나 영향이 달라지는 기준과 선택지 (법률안마다 다름)')
 
+class SelectedCriterion(BaseModel):
+    name: str = Field(description='기준 이름 (/profile의 criteria[].name)', examples=['주거 형태'])
+    selected: list[str] = Field([], description='고른 선택지', examples=[['월세']])
+
+class HappenRequest(BaseModel):
+    bill_no: str = Field(description='의안 번호', examples=['2222564'])
+    targets: list[str] = Field([], description='고른 대상 (/profile의 targets 중)', examples=[['무주택 세대주', '근로자']])
+    criteria: list[SelectedCriterion] = Field([], description='기준별로 고른 선택지')
+
+class HappenCheck(BaseModel):
+    condition: str = Field(description='조건', examples=['소득 기준'])
+    status: Literal['match', 'mismatch', 'unknown'] = Field(
+        description='match: 맞음, mismatch: 맞지 않음, unknown: 고른 조건으로는 알 수 없어 직접 확인 필요')
+    reason: str = Field(description='이유', examples=['고른 조건에 소득이 없어 직접 확인이 필요해요'])
+
 class HappenResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
-    happens: list[tuple[str, str]] = Field(
-        description='법률안이 시행되면 생기는 일. 각 원소는 [대상, 변화] 형태이다. (개괄식)',
-        examples=[[['월세 사는 청년', '월세 세액공제를 더 많이 받게 됨']]],
+    applicability: Literal['high', 'medium', 'low'] = Field(
+        description='해당될 가능성 (high: 높음, medium: 확인 필요, low: 낮음)')
+    headline: str = Field(description='한 줄 설명', examples=['이 조건에 맞는 분들은 월세에 대한 세금을 더 많이 돌려받을 수 있어요.'])
+    changes: list[tuple[str, str, str]] = Field(
+        description='바뀌는 것. 각 원소는 [바뀌는 것, 지금, 법안이 적용되면] 형태이다. 숫자는 원문에 있을 때만 나온다.',
+        examples=[[['월세 세액공제율', '10%', '15%'], ['공제받을 수 있는 소득 기준', '현재 기준', '더 넓어짐']]],
     )
+    checks: list[HappenCheck] = Field(description='고른 조건과 법안의 적용 조건 대조')
+    evidence: list[str] = Field(description='근거가 된 원문 인용 (원문에 실제로 있는 문장만)')
+    stage: str = Field(description='국회 처리 단계 (AI가 아닌 국회 처리 정보). 처리 전이면 "심사 중"', examples=['심사 중'])
 
 class CompareResponse(BaseModel):
     a_bill_no: str = Field(description='비교할 법률안 A의 의안 번호')
@@ -206,26 +227,34 @@ def profile(bill_no: str = Query(description='의안 번호', examples=['2222564
         raise HTTPException(502, str(e))
     return {'bill_no': bill_no, **result}
 
-@app.get(
+@app.post(
     '/happen',
     response_model=HappenResponse,
-    summary='법률안이 시행되면 나에게 생기는 일',
-    description='법률안의 제안이유 및 주요내용을 AI로 분석해, 시행되면 누구에게 어떤 일이 생기는지 돌려준다.\n\n'
-                '- `happens`의 각 원소는 `[대상, 변화]` 형태로 표시한다. (예: `["월세 사는 청년", "월세 세액공제를 더 많이 받게 됨"]`)\n'
-                '- 일반 시민에게 생기는 일이 앞에 온다.\n'
-                '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
+    summary='맞춤 요약 (이 법안이 적용되면?)',
+    description='법률안과 사용자가 고른 프로필(대상, 기준별 선택지)을 받아, 그 조건에 맞는 사람에게 생기는 변화를 AI로 설명한다.\n\n'
+                '- 프로필은 `/profile` 응답에서 고른 값을 그대로 보내면 된다. 아무것도 고르지 않아도 된다.\n'
+                '- `changes`의 각 원소는 `[바뀌는 것, 지금, 법안이 적용되면]` 형태이다.\n'
+                '- `evidence`는 원문에 실제로 있는 문장만 돌려준다.\n'
+                '- `stage`는 AI가 아닌 국회 처리 정보다.\n'
+                '- 같은 법률안·같은 프로필에는 항상 같은 결과를 돌려준다.\n'
                 '- `/preprocess` 없이도 사용할 수 있다.',
     responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
                502: {'description': 'AI 요청 실패'}},
 )
-def happen(bill_no: str = Query(description='의안 번호', examples=['2222564'])):
-    text = data.get_summary(bill_no)
-    if not text:
+def happen(request: HappenRequest):
+    bill = data.get_bill(request.bill_no.strip())
+    if bill is None or not bill['SUMMARY']:
         raise HTTPException(404, '해당 법률안의 요약본이 없습니다.')
+    profile = {
+        'targets': [t.strip() for t in request.targets if t.strip()],
+        'criteria': [{'name': c.name.strip(), 'selected': [o.strip() for o in c.selected if o.strip()]}
+                     for c in request.criteria],
+    }
     try:
-        return {'bill_no': bill_no, 'happens': ai.happen(text)}
+        result = ai.happen(bill['SUMMARY'], profile)
     except Exception as e:
         raise HTTPException(502, str(e))
+    return {'bill_no': bill['BILL_NO'], **result, 'stage': bill['PROC_RESULT'] or '심사 중'}
 
 # 실행부 (python main.py)
 if __name__ == '__main__':

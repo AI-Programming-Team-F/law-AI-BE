@@ -58,14 +58,22 @@ COMPARE_FORMAT = {
 
 HAPPEN_PROMPT = (
     '너는 대한민국 국회 법률안을 일반 시민에게 설명하는 도우미다. '
-    '법률안의 제안이유 및 주요내용을 읽고, 이 법률안이 시행되면 사람들에게 실제로 생기는 일을 정리하라. '
-    '항목 하나당 영향을 받는 대상(target)과 그 대상에게 생기는 변화(change)를 쓰고, 2~5개 항목을 작성하라. '
-    'target은 "월세 사는 청년", "어린이집 원장"처럼 누구인지 바로 알 수 있는 짧은 명사구로, '
-    'change는 개괄식(명사형 종결, 예: "월세 세액공제를 더 많이 받게 됨")으로 쉬운 한국어 60자 미만으로 쓴다. '
-    '일반 시민에게 생기는 일을 먼저 쓰고, 원문에 없는 내용은 추가하지 마라.'
+    '법률안의 제안이유 및 주요내용과 사용자가 고른 조건(프로필)을 읽고, '
+    '이 법률안이 적용되면 그 조건에 맞는 사람에게 생기는 변화를 쉬운 해요체로 설명하라.\n'
+    '- applicability: 고른 조건으로 볼 때 이 법률안에 해당될 가능성. '
+    'high(조건이 법안의 대상과 맞음), medium(일부 조건을 알 수 없어 확인 필요), low(조건이 법안의 대상과 맞지 않음). '
+    '정보가 부족하면 단정하지 말고 medium으로 하라.\n'
+    '- headline: "이 조건에 맞는 분들은 ~"으로 시작하는 한 문장 (60자 미만).\n'
+    '- changes: 바뀌는 것(item), 지금(before), 법안이 적용되면(after)을 1~4개. '
+    '숫자는 원문에 있을 때만 쓰고, 없으면 "현재 기준" → "더 넓어짐"처럼 말로 쓴다.\n'
+    '- checks: 고른 조건과 원문의 적용 조건을 하나씩 대조한다. '
+    'status는 match(맞음), mismatch(맞지 않음), unknown(고른 조건으로는 알 수 없어 직접 확인 필요). '
+    '사용자가 고르지 않았지만 원문에 있는 적용 조건(예: 소득 기준)도 unknown으로 넣는다. reason은 40자 미만.\n'
+    '- evidence: 판단의 근거가 된 원문 문장을 원문 그대로 1~3개 짧게 인용한다. 고치거나 요약하지 마라.\n'
+    '원문에 없는 내용은 추가하지 마라.'
 )
 
-# 생기는 일 구조화된 출력 형식: {"happens": [{"target": "...", "change": "..."}, ...]}
+# 맞춤 요약 구조화된 출력 형식
 HAPPEN_FORMAT = {
     'type': 'json_schema',
     'json_schema': {
@@ -74,21 +82,37 @@ HAPPEN_FORMAT = {
         'schema': {
             'type': 'object',
             'properties': {
-                'happens': {
+                'applicability': {'type': 'string', 'enum': ['high', 'medium', 'low']},
+                'headline': {'type': 'string'},
+                'changes': {
                     'type': 'array',
-                    'description': '법률안이 시행되면 생기는 일 (항목당 하나)',
                     'items': {
                         'type': 'object',
                         'properties': {
-                            'target': {'type': 'string', 'description': '영향을 받는 대상'},
-                            'change': {'type': 'string', 'description': '그 대상에게 생기는 변화 (개괄식)'},
+                            'item': {'type': 'string', 'description': '바뀌는 것'},
+                            'before': {'type': 'string', 'description': '지금'},
+                            'after': {'type': 'string', 'description': '법안이 적용되면'},
                         },
-                        'required': ['target', 'change'],
+                        'required': ['item', 'before', 'after'],
                         'additionalProperties': False,
                     },
                 },
+                'checks': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'condition': {'type': 'string', 'description': '조건'},
+                            'status': {'type': 'string', 'enum': ['match', 'mismatch', 'unknown']},
+                            'reason': {'type': 'string', 'description': '이유'},
+                        },
+                        'required': ['condition', 'status', 'reason'],
+                        'additionalProperties': False,
+                    },
+                },
+                'evidence': {'type': 'array', 'items': {'type': 'string'}, 'description': '근거가 된 원문 인용'},
             },
-            'required': ['happens'],
+            'required': ['applicability', 'headline', 'changes', 'checks', 'evidence'],
             'additionalProperties': False,
         },
     },
@@ -200,17 +224,36 @@ def compare(a_text: str, b_text: str) -> list[list[str]]:
 
     return _cached('compare\0' + a_text + '\0' + b_text, make)
 
-# 법률안이 시행되면 생기는 일 → 리스트, 각 원소는 [대상, 변화] (개괄식)
+# 프로필에 맞춘 요약
+# profile: {"targets": [...], "criteria": [{"name": "...", "selected": [...]}, ...]}
+# 반환: {"applicability", "headline", "changes": [[바뀌는 것, 지금, 적용되면]], "checks": [...], "evidence": [...]}
+# - evidence는 원문에 실제로 들어 있는 인용만 남긴다
 # 실패하면 RuntimeError
-def happen(text: str) -> list[list[str]]:
-    def make() -> list[list[str]]:
-        content = _chat(HAPPEN_PROMPT, text, HAPPEN_FORMAT)
+def happen(text: str, profile: dict) -> dict:
+    lines = []
+    if profile['targets']:
+        lines.append(f'- 대상: {", ".join(profile["targets"])}')
+    for c in profile['criteria']:
+        if c['selected']:
+            lines.append(f'- {c["name"]}: {", ".join(c["selected"])}')
+    profile_text = '\n'.join(lines) or '(고른 조건 없음)'
+
+    def make() -> dict:
+        content = _chat(HAPPEN_PROMPT, f'[고른 조건]\n{profile_text}\n\n[법률안]\n{text}', HAPPEN_FORMAT)
         try:
-            return [[str(x['target']).strip(), str(x['change']).strip()] for x in json.loads(content)['happens']]
-        except (json.JSONDecodeError, KeyError, TypeError):
+            result = json.loads(content)
+            return {
+                'applicability': result['applicability'],
+                'headline': result['headline'].strip(),
+                'changes': [[c['item'].strip(), c['before'].strip(), c['after'].strip()] for c in result['changes']],
+                'checks': [{'condition': c['condition'].strip(), 'status': c['status'], 'reason': c['reason'].strip()}
+                           for c in result['checks']],
+                'evidence': list(dict.fromkeys(e.strip() for e in result['evidence'] if e.strip() and e.strip() in text)),
+            }
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
             raise RuntimeError(f'AI 응답 형식 오류: {content[:200]}')
 
-    return _cached('happen\0' + text, make)
+    return _cached('happen\0' + profile_text + '\0' + text, make)
 
 # 프로필 선택지 추천 → {"targets": [...], "criteria": [{"name", "multiple", "options"}, ...]}
 # - targets는 원문에 실제로 들어 있는 표현만 남긴다 (화면의 "원문" 표시를 믿을 수 있게)
