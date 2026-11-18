@@ -51,6 +51,17 @@ class SummaryResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
     summary: str = Field(description='AI가 쉽게 풀어 쓴 요약')
 
+class ProfileCriterion(BaseModel):
+    name: str = Field(description='기준 이름 (법률안마다 다름)', examples=['주거 형태'])
+    multiple: bool = Field(description='여러 개를 고를 수 있는지 (false면 하나만 선택)')
+    options: list[str] = Field(description='선택지 (2개 이상)', examples=[['월세', '전세', '자가']])
+
+class ProfileResponse(BaseModel):
+    bill_no: str = Field(description='의안 번호')
+    targets: list[str] = Field(description='원문에 직접 나온 대상 (원문 표현 그대로, 없으면 빈 리스트)',
+                               examples=[['무주택 세대주', '근로자']])
+    criteria: list[ProfileCriterion] = Field(description='적용 여부나 영향이 달라지는 기준과 선택지 (법률안마다 다름)')
+
 class HappenResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
     happens: list[tuple[str, str]] = Field(
@@ -170,6 +181,30 @@ def compare(
     except Exception as e:
         raise HTTPException(502, str(e))
     return {'a_bill_no': a_bill_no, 'b_bill_no': b_bill_no, 'differences': differences}
+
+@app.get(
+    '/profile',
+    response_model=ProfileResponse,
+    summary='프로필 선택지 추천',
+    description='법률안을 AI로 분석해, 맞춤 요약에 쓸 프로필 선택지를 추천한다.\n\n'
+                '- `targets`: 원문에 직접 나온 대상. 원문에 실제로 있는 표현만 돌려준다.\n'
+                '- `criteria`: 이 법률안의 적용 여부나 영향이 달라지는 기준과 선택지. '
+                '기준의 종류와 개수(1~4개)는 법률안마다 다르다. (예: 주거 형태 → 월세/전세/자가)\n'
+                '- `multiple`이 false인 기준은 하나만, true인 기준은 여러 개를 고를 수 있다.\n'
+                '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
+                '- `/preprocess` 없이도 사용할 수 있다.',
+    responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
+               502: {'description': 'AI 요청 실패'}},
+)
+def profile(bill_no: str = Query(description='의안 번호', examples=['2222564'])):
+    text = data.get_summary(bill_no)
+    if not text:
+        raise HTTPException(404, '해당 법률안의 요약본이 없습니다.')
+    try:
+        result = ai.profile(text)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    return {'bill_no': bill_no, **result}
 
 @app.get(
     '/happen',

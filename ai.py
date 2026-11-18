@@ -94,6 +94,52 @@ HAPPEN_FORMAT = {
     },
 }
 
+PROFILE_PROMPT = (
+    '너는 대한민국 국회 법률안을 일반 시민에게 설명하는 도우미다. '
+    '법률안의 제안이유 및 주요내용을 읽고, 사용자가 "이 법안이 나에게 적용되는지" 판단할 수 있도록 프로필 선택지를 만들어라.\n'
+    '- targets: 원문에 직접 나온 대상(사람이나 집단)을 원문 표현 그대로 1~5개 뽑는다. '
+    '조사는 빼고 "무주택 세대주", "근로자"처럼 짧은 명사구로 쓴다. 원문에 없는 표현은 만들지 마라.\n'
+    '- criteria: 이 법률안의 적용 여부나 영향이 달라지는 기준을 1~4개 만든다. '
+    '기준은 원문의 조건에서 찾는다 (예: 주거 형태, 소득 수준, 나이대, 사업 규모, 자녀 유무 등 법안마다 다름). '
+    '각 기준(name)마다 사용자가 고를 선택지(options)를 2~6개, 짧은 명사구로 만든다. '
+    '하나만 고를 수 있는 기준이면 multiple=false, 여러 개를 고를 수 있으면 multiple=true로 한다. '
+    'targets와 같은 내용은 기준으로 다시 만들지 마라.'
+)
+
+# 프로필 추천 구조화된 출력 형식:
+# {"targets": [...], "criteria": [{"name": "...", "multiple": false, "options": ["...", ...]}, ...]}
+PROFILE_FORMAT = {
+    'type': 'json_schema',
+    'json_schema': {
+        'name': 'bill_profile',
+        'strict': True,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'targets': {'type': 'array', 'items': {'type': 'string'},
+                            'description': '원문에 직접 나온 대상 (원문 표현 그대로)'},
+                'criteria': {
+                    'type': 'array',
+                    'description': '적용 여부나 영향이 달라지는 기준',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'name': {'type': 'string', 'description': '기준 이름 (예: 주거 형태)'},
+                            'multiple': {'type': 'boolean', 'description': '여러 개를 고를 수 있는지'},
+                            'options': {'type': 'array', 'items': {'type': 'string'},
+                                        'description': '선택지 (예: 월세, 전세, 자가)'},
+                        },
+                        'required': ['name', 'multiple', 'options'],
+                        'additionalProperties': False,
+                    },
+                },
+            },
+            'required': ['targets', 'criteria'],
+            'additionalProperties': False,
+        },
+    },
+}
+
 # 같은 내용에는 같은 답을 돌려주기 위한 캐시 (요청 내용 해시 → 결과)
 # temperature=0이어도 LLM 응답이 완전히 같다는 보장은 없으므로 한 번 만든 결과를 재사용한다.
 _cache: dict[str, object] = {}
@@ -165,3 +211,28 @@ def happen(text: str) -> list[list[str]]:
             raise RuntimeError(f'AI 응답 형식 오류: {content[:200]}')
 
     return _cached('happen\0' + text, make)
+
+# 프로필 선택지 추천 → {"targets": [...], "criteria": [{"name", "multiple", "options"}, ...]}
+# - targets는 원문에 실제로 들어 있는 표현만 남긴다 (화면의 "원문" 표시를 믿을 수 있게)
+# - 기준과 선택지는 법률안마다 AI가 만든다 (빈 이름·중복·선택지 2개 미만인 기준은 버림)
+# 실패하면 RuntimeError
+def profile(text: str) -> dict:
+    def make() -> dict:
+        content = _chat(PROFILE_PROMPT, text, PROFILE_FORMAT)
+        try:
+            result = json.loads(content)
+            targets = [t.strip() for t in result['targets'] if t.strip() and t.strip() in text]
+
+            criteria, names = [], set()
+            for c in result['criteria']:
+                name = c['name'].strip()
+                options = list(dict.fromkeys(o.strip() for o in c['options'] if o.strip()))
+                if name and name not in names and len(options) >= 2:
+                    names.add(name)
+                    criteria.append({'name': name, 'multiple': bool(c['multiple']), 'options': options})
+
+            return {'targets': list(dict.fromkeys(targets)), 'criteria': criteria}
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+            raise RuntimeError(f'AI 응답 형식 오류: {content[:200]}')
+
+    return _cached('profile\0' + text, make)
