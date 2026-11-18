@@ -163,25 +163,28 @@ class Data:
         return prep.get_summary(bill_no)
 
     # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
-    # - 키워드 점수: 검색어(띄어쓰기 단위)가 법률안 이름에 있으면 2, 요약본에 있으면 1을 더한 뒤 최대값(3 × 단어 수)으로 나눔
+    # - 검색어 단어: Okt로 뽑은 명사 (예: "월세가 너무 비싸" → ["월세"])
+    # - 키워드 점수: 검색어 단어가 법률안 이름에 있으면 2, 요약본에 있으면 1을 더한 뒤 최대값(3 × 단어 수)으로 나눔
     # - 의미 점수: Word2Vec으로 만든 검색어 벡터와 법률안 벡터의 코사인 유사도 (음수는 0)
     # 키워드가 하나도 없는 법안은 의미 점수가 MIN_SIMILARITY 이상일 때만 결과에 넣는다.
     KEYWORD_WEIGHT = 0.5
     MIN_SIMILARITY = 0.3
 
-    # 검색어에서 Word2Vec에 넣을 단어 뽑기 (전처리와 같은 규칙: 명사, 두 글자 이상, 불용어 제외)
+    # 검색어에서 명사만 뽑기 (전처리와 같은 규칙: 두 글자 이상, 불용어 제외)
+    # 남는 명사가 없으면(예: "비싸", "법률") 띄어쓰기 단위 단어를 그대로 쓴다.
     def _query_words(self, query: str) -> list[str]:
         nouns = self._okt.nouns(query) if self._okt is not None else []
-        words = [w for w in nouns + query.split() if len(w) > 1 and w not in self._stopwords]
-        return list(dict.fromkeys(words))  # 순서 유지하며 중복 제거
+        words = [w for w in nouns if len(w) > 1 and w not in self._stopwords]
+        return list(dict.fromkeys(words or query.split()))  # 순서 유지하며 중복 제거
 
     def search(self, query: str, limit: int = 20) -> list[dict]:
         df, wv, doc_vectors = self._df, self._wv, self._doc_vectors
         if df is None or not query.strip():
             return []
 
+        terms = self._query_words(query)
+
         # 키워드 점수 (0~1)
-        terms = query.split()
         keyword = pandas.Series(0.0, index=df.index)
         for term in terms:
             keyword += df['BILL_NAME'].str.contains(term, regex=False) * 2
@@ -190,7 +193,7 @@ class Data:
 
         # 의미 점수 (0~1)
         semantic = pandas.Series(0.0, index=df.index)
-        query_vector = wv.query_vector(self._query_words(query)) if wv is not None else None
+        query_vector = wv.query_vector(terms) if wv is not None else None
         if query_vector is not None:
             semantic = pandas.Series(numpy.clip(doc_vectors @ query_vector, 0, 1), index=df.index)
 
