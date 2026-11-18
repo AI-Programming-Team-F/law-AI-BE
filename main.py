@@ -42,7 +42,7 @@ class Bill(BaseModel):
     BILL_NAME: str = Field(description='법률안 이름')
     PROC_RESULT: str | None = Field(description='본회의심의결과')
     SUMMARY: str = Field(description='요약본 (제안이유 및 주요내용)')
-    SCORE: int = Field(description='관련도 (높을수록 관련 있음)')
+    SCORE: float = Field(ge=0, le=1, description='관련도 (0~1, 높을수록 관련 있음)')
 
 class SummaryResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
@@ -71,9 +71,9 @@ class SearchResponse(BaseModel):
     description='국회 API에서 법률안을 수집하고 전처리한다. 백그라운드에서 진행되므로 바로 응답한다.\n\n'
                 '- 이미 진행 중이면 새로 시작하지 않는다 (`started: false`).\n'
                 '- 완료된 뒤 다시 호출하면 처음부터 다시 수집한다. 수집 중에도 기존 데이터로 검색할 수 있다.\n'
-                '- 2,000건 기준 약 10분 걸린다.',
+                '- 20,000건 기준 약 10분 걸린다.',
 )
-def preprocess(size: int = Query(2000, ge=1, description='수집할 법률안 수 (최신순)')):
+def preprocess(size: int = Query(20000, ge=1, description='수집할 법률안 수 (최신순)')):
     started = data.start_preprocess(size)
     return {'started': started, 'status': data.status, 'fetched': data.fetched, 'error': data.error}
 
@@ -82,13 +82,19 @@ def preprocess(size: int = Query(2000, ge=1, description='수집할 법률안 �
     response_model=SearchResponse,
     summary='법률안 검색',
     description='검색어와 관련된 법률안을 관련도 순으로 돌려준다.\n\n'
-                '※ 임시 구현. AI(Word2Vec) 기반 검색으로 교체 예정.',
+                '- 검색어가 직접 들어 있는 법률안과, 검색어와 의미가 비슷한 법률안(Word2Vec)을 함께 찾는다.\n'
+                '- `/preprocess`가 끝나야 결과가 나온다.',
 )
 def search(
     query: str = Query(description='검색어', examples=['소방']),
     limit: int = Query(20, ge=1, le=100, description='최대 결과 수'),
 ):
     return {'preprocess': data.is_ready, 'data': data.search(query, limit)}
+
+#TODO
+@app.get('/search/billno')
+def search_billno():
+    pass
 
 @app.get(
     '/summary',

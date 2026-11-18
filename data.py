@@ -1,5 +1,6 @@
 import threading
 
+import numpy
 import pandas
 from konlpy.tag import Okt
 
@@ -21,6 +22,10 @@ class Data:
                 instance._df = None
                 instance._word2id = {}
                 instance._id2word = {}
+                instance._okt = None
+                instance._stopwords = set()
+                instance._wv = None            # 학습된 단어 벡터 (w2v.WordVectors)
+                instance._doc_vectors = None   # 법률안 벡터 (법안 수, dim), _df와 행 순서 같음
                 instance._status = 'idle'      # idle | running | done | failed
                 instance._error = None
                 instance._fetched = 0          # 요약본 수집 진행률 (%)
@@ -89,7 +94,7 @@ class Data:
     def _preprocess(self, size: int) -> None:
         try:
             log.step('형태소 분석기(Okt) 로딩')
-            okt = Okt()
+            okt = self._okt or Okt()
 
             # 의안 번호 가져오기
             log.step(f'의안 목록 수집 시작 (목표 {size}건)')
@@ -117,7 +122,7 @@ class Data:
             # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
             df['NOUNS'] = df['SUMMARY'].fillna('').apply(log.with_progress(okt.nouns, len(df), '명사 추출'))
             stopwords = list(df['NOUNS'].explode().value_counts().head(20).keys())
-            for x in ['제안', '이유', '현행법', '최근']: stopwords.append(x)
+            for x in ['제안', '이유', '현행법', '최근', '법']: stopwords.append(x)
             df['NOUNS'] = df['NOUNS'].apply(lambda nouns: list(filter(lambda x: x not in stopwords and len(x) > 1, nouns)))
 
             # 없는 행 삭제
@@ -129,8 +134,16 @@ class Data:
             df, word2id, id2word = w2v.build_vocab(df, min_count=3)
             log.step(f'단어 사전 생성 완료 ({len(word2id)}개)')
 
+            # Word2Vec 학습 (TensorFlow)
+            log.step(f'Word2Vec 학습 시작 (단어 {len(word2id)}개)')
+            vectors = w2v.train(df['IDS'], vocab_size=len(word2id) + 1)
+            wv = w2v.WordVectors(vectors, word2id, id2word)
+            doc_vectors = wv.fit_documents(df['IDS'])
+            log.step('Word2Vec 학습 완료')
+
             # 완성된 데이터로 한 번에 교체
             self._df, self._word2id, self._id2word = df, word2id, id2word
+            self._okt, self._stopwords, self._wv, self._doc_vectors = okt, set(stopwords), wv, doc_vectors
             self._status = 'done'
         except Exception as e:
             self._status = 'failed'
@@ -149,22 +162,43 @@ class Data:
                 return row.iloc[0]
         return prep.get_summary(bill_no)
 
-    # TODO: Word2Vec 학습 후 유사 키워드 확장 / 의미 기반 검색으로 교체
-    # 지금은 임시로, 검색어가 법률안 이름이나 요약본에 들어 있는 법안을 찾는다.
-    # 법률안 이름에 들어 있으면 더 위에 오도록 점수를 매긴다.
+    # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
+    # - 키워드 점수: 검색어(띄어쓰기 단위)가 법률안 이름에 있으면 2, 요약본에 있으면 1을 더한 뒤 최대값(3 × 단어 수)으로 나눔
+    # - 의미 점수: Word2Vec으로 만든 검색어 벡터와 법률안 벡터의 코사인 유사도 (음수는 0)
+    # 키워드가 하나도 없는 법안은 의미 점수가 MIN_SIMILARITY 이상일 때만 결과에 넣는다.
+    KEYWORD_WEIGHT = 0.5
+    MIN_SIMILARITY = 0.3
+
+    # 검색어에서 Word2Vec에 넣을 단어 뽑기 (전처리와 같은 규칙: 명사, 두 글자 이상, 불용어 제외)
+    def _query_words(self, query: str) -> list[str]:
+        nouns = self._okt.nouns(query) if self._okt is not None else []
+        words = [w for w in nouns + query.split() if len(w) > 1 and w not in self._stopwords]
+        return list(dict.fromkeys(words))  # 순서 유지하며 중복 제거
+
     def search(self, query: str, limit: int = 20) -> list[dict]:
-        df = self._df
+        df, wv, doc_vectors = self._df, self._wv, self._doc_vectors
         if df is None or not query.strip():
             return []
 
+        # 키워드 점수 (0~1)
         terms = query.split()
-        score = pandas.Series(0, index=df.index)
+        keyword = pandas.Series(0.0, index=df.index)
         for term in terms:
-            score += df['BILL_NAME'].str.contains(term, regex=False) * 2
-            score += df['SUMMARY'].str.contains(term, regex=False) * 1
+            keyword += df['BILL_NAME'].str.contains(term, regex=False) * 2
+            keyword += df['SUMMARY'].str.contains(term, regex=False) * 1
+        keyword /= 3 * len(terms)
 
-        result = df.assign(SCORE=score)
-        result = result[result['SCORE'] > 0].sort_values('SCORE', ascending=False).head(limit)
+        # 의미 점수 (0~1)
+        semantic = pandas.Series(0.0, index=df.index)
+        query_vector = wv.query_vector(self._query_words(query)) if wv is not None else None
+        if query_vector is not None:
+            semantic = pandas.Series(numpy.clip(doc_vectors @ query_vector, 0, 1), index=df.index)
+
+        score = self.KEYWORD_WEIGHT * keyword + (1 - self.KEYWORD_WEIGHT) * semantic
+        matched = (keyword > 0) | (semantic >= self.MIN_SIMILARITY)
+
+        result = df.assign(SCORE=score.round(4))[matched]
+        result = result.sort_values('SCORE', ascending=False, kind='stable').head(limit)  # 같은 점수면 최신순 유지
         result = result[['BILL_NO', 'BILL_NAME', 'PROC_RESULT', 'SUMMARY', 'SCORE']]
 
         # pandas는 빈 값을 NaN으로 표시하지만 JSON에는 NaN이 없으므로 None(null)으로 바꾼다.
