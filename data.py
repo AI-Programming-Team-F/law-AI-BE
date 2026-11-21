@@ -6,6 +6,7 @@ from konlpy.tag import Okt
 
 import log
 import prep
+from store import store
 import w2v
 
 # 수집·전처리한 법률안 데이터를 메모리에 보관하는 싱글톤
@@ -103,21 +104,31 @@ class Data:
                 raise RuntimeError('의안 목록 수집 실패')
             log.step(f'의안 목록 수집 완료 ({len(bills)}건)')
 
-            # pandas DataFrame으로 변환 (필요한 열만 선택)
-            df = pandas.DataFrame(bills)[['BILL_NAME', 'BILL_NO', 'COMMITTEE', 'PROC_RESULT']]
+            # pandas DataFrame으로 변환
+            # (바뀔 수 있는 정보인 COMMITTEE, PROC_RESULT는 저장소가 아니라 방금 받은 목록에서 가져온다)
+            listed = pandas.DataFrame(bills).drop_duplicates('BILL_NO')  # 수집 중 새 법안이 끼어들면 페이지가 밀려 중복될 수 있음
+            df = listed[['BILL_NAME', 'BILL_NO', 'COMMITTEE', 'PROC_RESULT']].copy()
+            stable = listed.set_index('BILL_NO').to_dict('index')
 
-            # 의안 번호마다 요약본 추출
+            # 의안 번호마다 요약본 추출: 저장소에 있으면 그대로 쓰고, 없으면 국회 API에서 받아 저장
             total = len(df)
-            count = 0
+            count = loaded = saved = 0
 
             def fetch_summary(bill_no: str) -> str | None:
-                nonlocal count
-                summary = prep.get_summary(bill_no)
+                nonlocal count, loaded, saved
+                record = store.load(bill_no)
+                if record is not None:
+                    summary = record['SUMMARY']
+                    loaded += 1
+                else:
+                    summary = prep.get_summary(bill_no)
+                    saved += store.save({**stable[bill_no], 'BILL_NO': bill_no, 'SUMMARY': summary})
                 count += 1
                 self._fetched = count * 100 // total
                 return summary
 
             df['SUMMARY'] = df['BILL_NO'].apply(log.with_progress(fetch_summary, total, '요약본 수집'))
+            log.step(f'요약본: 저장소에서 {loaded}건, 새로 저장 {saved}건')
 
             # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
             df['NOUNS'] = df['SUMMARY'].fillna('').apply(log.with_progress(okt.nouns, len(df), '명사 추출'))
@@ -153,17 +164,19 @@ class Data:
     # ---------- 검색 ----------
 
     # 의안 번호로 원문 요약본(제안이유 및 주요내용) 찾기
-    # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다.
+    # 메모리 → 저장소 → 국회 API 순서로 찾는다.
     def get_summary(self, bill_no: str) -> str | None:
         df = self._df
         if df is not None:
             row = df.loc[df['BILL_NO'] == bill_no, 'SUMMARY']
             if not row.empty:
                 return row.iloc[0]
-        return prep.get_summary(bill_no)
+        record = store.load(bill_no)
+        return record['SUMMARY'] if record is not None else prep.get_summary(bill_no)
 
     # 의안 번호로 법률안 하나 찾기 (없으면 None)
     # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다. (요약본이 아직 없으면 SUMMARY는 None)
+    # 요약본은 저장소에 있으면 저장소 것을 쓴다.
     BILL_COLUMNS = ['BILL_NO', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY']
 
     def get_bill(self, bill_no: str) -> dict | None:
@@ -176,7 +189,8 @@ class Data:
         bill = prep.get_bill(22, bill_no)
         if bill is None:
             return None
-        bill['SUMMARY'] = prep.get_summary(bill_no)
+        record = store.load(bill_no)
+        bill['SUMMARY'] = record['SUMMARY'] if record is not None else prep.get_summary(bill_no)
         return {column: bill.get(column) for column in self.BILL_COLUMNS}
 
     # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
