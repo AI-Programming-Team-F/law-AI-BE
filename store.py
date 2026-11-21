@@ -26,6 +26,13 @@ class BillStore:
     def has(self, bill_no: str) -> bool:
         return os.path.isfile(self._path(bill_no))
 
+    # 저장된 법률안의 의안 번호 목록
+    def bill_nos(self) -> list[str]:
+        if not os.path.isdir(self._directory):
+            return []
+        names = (re.fullmatch(r'(\d+)\.json', name) for name in os.listdir(self._directory))
+        return sorted(m.group(1) for m in names if m)
+
     # 저장된 법률안 불러오기 (없거나 파일이 깨졌으면 None)
     def load(self, bill_no: str) -> dict | None:
         try:

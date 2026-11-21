@@ -2,8 +2,13 @@ import os
 
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')  # TensorFlow 안내 로그 줄이기
 
+import json
+
 import numpy
 import pandas
+
+# 학습 결과물(단어 벡터, 단어 사전, 불용어)을 두는 폴더 (환경 변수 MODEL_DIR로 바꿀 수 있음)
+MODEL_DIR = os.getenv('MODEL_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model'))
 
 # 단어 사전 생성
 # min_count 미만으로 등장한 드문 단어는 학습할 문맥이 부족하므로 사전에서 제외
@@ -104,15 +109,16 @@ class WordVectors:
         best = numpy.argsort(-sims)[:topn]
         return [(self._id2word[i], round(float(sims[i]), 4)) for i in best]
 
-    # 단어 ID 리스트의 평균 벡터 (단어가 없으면 None)
-    def _mean(self, ids: list[int]) -> numpy.ndarray | None:
-        return self._vectors[ids].mean(axis=0) if ids else None
+    # 단어 ID 리스트(또는 numpy 배열)의 평균 벡터 (단어가 없으면 None)
+    def _mean(self, ids) -> numpy.ndarray | None:
+        return self._vectors[ids].mean(axis=0) if len(ids) else None
 
     # 법률안마다 명사 벡터의 평균 → (법안 수, dim)
     # 모든 법안에 공통으로 섞인 성분(전체 평균)을 빼야 법안끼리 구분이 잘 된다.
     def fit_documents(self, ids_series: pandas.Series) -> numpy.ndarray:
         dim = self._vectors.shape[1]
-        docs = numpy.array([self._mean(ids) if ids else numpy.zeros(dim) for ids in ids_series])
+        docs = numpy.array([self._mean(ids) if len(ids) else numpy.zeros(dim) for ids in ids_series],
+                           dtype='float32')
         self._doc_mean = docs.mean(axis=0)
         return normalize(docs - self._doc_mean)
 
@@ -120,3 +126,59 @@ class WordVectors:
     def query_vector(self, words: list[str]) -> numpy.ndarray | None:
         mean = self._mean([self._word2id[w] for w in words if w in self._word2id])
         return None if mean is None else normalize(mean - self._doc_mean)
+
+
+# 학습 결과물: 단어 벡터 + 단어 사전 + 불용어
+# - 로컬에서 train.py로 만들어 저장하고, 서버는 불러오기만 한다 (서버에는 TensorFlow가 필요 없음)
+# - 파일 이름과 형식은 이 클래스 안에서만 다룬다
+class Model:
+    _VECTORS = 'vectors.npy'
+    _VOCAB = 'vocab.json'
+
+    def __init__(self, vectors: numpy.ndarray, word2id: dict[str, int], stopwords: list[str]):
+        self._vectors = vectors.astype('float32')
+        self._word2id = dict(word2id)
+        self._id2word = {i: w for w, i in self._word2id.items()}
+        self._stopwords = frozenset(stopwords)
+
+    @property
+    def stopwords(self) -> frozenset[str]:
+        return self._stopwords
+
+    @property
+    def word2id(self) -> dict[str, int]:
+        return dict(self._word2id)
+
+    @property
+    def id2word(self) -> dict[int, str]:
+        return dict(self._id2word)
+
+    # 단어 리스트 → 단어 ID 배열 (int32, 사전에 없는 단어는 빠짐)
+    def to_ids(self, words: list[str]) -> numpy.ndarray:
+        return numpy.array([self._word2id[w] for w in words if w in self._word2id], dtype='int32')
+
+    def word_vectors(self) -> WordVectors:
+        return WordVectors(self._vectors, self._word2id, self._id2word)
+
+    def save(self, directory: str) -> None:
+        os.makedirs(directory, exist_ok=True)
+        words = [''] * (len(self._word2id) + 1)  # 0번은 패딩
+        for word, i in self._word2id.items():
+            words[i] = word
+        numpy.save(os.path.join(directory, self._VECTORS), self._vectors)
+        with open(os.path.join(directory, self._VOCAB), 'w', encoding='utf-8') as f:
+            json.dump({'words': words, 'stopwords': sorted(self._stopwords)}, f, ensure_ascii=False)
+
+    # 저장된 모델 불러오기 (없거나 깨졌으면 None)
+    @classmethod
+    def load(cls, directory: str) -> 'Model | None':
+        try:
+            vectors = numpy.load(os.path.join(directory, cls._VECTORS))
+            with open(os.path.join(directory, cls._VOCAB), encoding='utf-8') as f:
+                vocab = json.load(f)
+            words = vocab['words']
+            if len(words) != len(vectors):
+                return None
+            return cls(vectors, {w: i for i, w in enumerate(words) if i > 0}, vocab['stopwords'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None

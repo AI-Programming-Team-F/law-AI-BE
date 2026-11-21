@@ -1,0 +1,3 @@
+# 로컬 학습(train.py)용: 서버 의존성 + TensorFlow
+-r requirements.txt
+tensorflow==2.21.0

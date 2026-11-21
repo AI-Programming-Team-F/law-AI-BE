@@ -1,10 +1,11 @@
+import gc
 import threading
 
 import numpy
 import pandas
-from konlpy.tag import Okt
 
 import log
+import nlp
 import prep
 from store import store
 import w2v
@@ -21,10 +22,8 @@ class Data:
             if cls._instance is None:
                 instance = super().__new__(cls)
                 instance._df = None
-                instance._word2id = {}
-                instance._id2word = {}
-                instance._okt = None
-                instance._stopwords = set()
+                instance._model = None         # 로컬에서 학습해 둔 모델 (w2v.Model), 없으면 키워드 검색만
+                instance._stopwords = frozenset(nlp.BASE_STOPWORDS)
                 instance._wv = None            # 학습된 단어 벡터 (w2v.WordVectors)
                 instance._doc_vectors = None   # 법률안 벡터 (법안 수, dim), _df와 행 순서 같음
                 instance._status = 'idle'      # idle | running | done | failed
@@ -62,11 +61,11 @@ class Data:
 
     @property
     def word2id(self) -> dict[str, int]:
-        return dict(self._word2id)
+        return {} if self._model is None else self._model.word2id
 
     @property
     def id2word(self) -> dict[int, str]:
-        return dict(self._id2word)
+        return {} if self._model is None else self._model.id2word
 
     # ---------- 전처리 ----------
 
@@ -90,13 +89,11 @@ class Data:
         threading.Thread(target=run, daemon=True).start()
         return True
 
-    # 수집 → 명사 추출 → 불용어 제거 → 단어 사전 생성
-    # 끝까지 성공했을 때만 내부 데이터를 한 번에 교체한다 (진행 중에도 기존 데이터로 검색 가능)
+    # 수집 → 학습된 모델 불러오기 → 명사 추출 → 법률안 벡터 계산
+    # - Word2Vec 학습은 서버에서 하지 않는다 (로컬에서 train.py로 학습해 model/에 저장해 둔 것을 쓴다)
+    # - 끝까지 성공했을 때만 내부 데이터를 한 번에 교체한다 (진행 중에도 기존 데이터로 검색 가능)
     def _preprocess(self, size: int) -> None:
         try:
-            log.step('형태소 분석기(Okt) 로딩')
-            okt = self._okt or Okt()
-
             # 의안 번호 가져오기
             log.step(f'의안 목록 수집 시작 (목표 {size}건)')
             bills = prep.get_bills_many(22, size)
@@ -107,8 +104,10 @@ class Data:
             # pandas DataFrame으로 변환
             # (바뀔 수 있는 정보인 COMMITTEE, PROC_RESULT는 저장소가 아니라 방금 받은 목록에서 가져온다)
             listed = pandas.DataFrame(bills).drop_duplicates('BILL_NO')  # 수집 중 새 법안이 끼어들면 페이지가 밀려 중복될 수 있음
+            del bills
             df = listed[['BILL_NAME', 'BILL_NO', 'COMMITTEE', 'PROC_RESULT']].copy()
             stable = listed.set_index('BILL_NO').to_dict('index')
+            del listed
 
             # 의안 번호마다 요약본 추출: 저장소에 있으면 그대로 쓰고, 없으면 국회 API에서 받아 저장
             total = len(df)
@@ -128,34 +127,38 @@ class Data:
                 return summary
 
             df['SUMMARY'] = df['BILL_NO'].apply(log.with_progress(fetch_summary, total, '요약본 수집'))
+            del stable
             log.step(f'요약본: 저장소에서 {loaded}건, 새로 저장 {saved}건')
 
-            # 요약본의 명사들을 추출하여 열 추가 (불용어 필터링)
-            df['NOUNS'] = df['SUMMARY'].fillna('').apply(log.with_progress(okt.nouns, len(df), '명사 추출'))
-            stopwords = list(df['NOUNS'].explode().value_counts().head(20).keys())
-            for x in ['제안', '이유', '현행법', '최근', '법']: stopwords.append(x)
-            df['NOUNS'] = df['NOUNS'].apply(lambda nouns: list(filter(lambda x: x not in stopwords and len(x) > 1, nouns)))
-
-            # 없는 행 삭제
+            # 요약본 없는 행 삭제
             before = len(df)
-            df = df[df['SUMMARY'].notna() & (df['NOUNS'].str.len() > 0)].reset_index(drop=True)
-            log.step(f'요약본/명사 없는 행 삭제: {before}건 → {len(df)}건')
+            df = df[df['SUMMARY'].notna()].reset_index(drop=True)
+            log.step(f'요약본 없는 행 삭제: {before}건 → {len(df)}건')
 
-            # 단어 사전 생성
-            df, word2id, id2word = w2v.build_vocab(df, min_count=3)
-            log.step(f'단어 사전 생성 완료 ({len(word2id)}개)')
+            # 학습된 모델 불러오기 (없으면 의미 검색 없이 키워드 검색만)
+            model = w2v.Model.load(w2v.MODEL_DIR)
+            if model is None:
+                log.step(f'학습된 모델이 없음 ({w2v.MODEL_DIR}) → 키워드 검색만 사용. 로컬에서 python train.py 실행 필요')
+                wv, doc_vectors, stopwords = None, None, frozenset(nlp.BASE_STOPWORDS)
+            else:
+                stopwords = model.stopwords
+                log.step(f'학습된 모델 불러오기 완료 (단어 {len(model.word2id)}개)')
 
-            # Word2Vec 학습 (TensorFlow)
-            log.step(f'Word2Vec 학습 시작 (단어 {len(word2id)}개)')
-            vectors = w2v.train(df['IDS'], vocab_size=len(word2id) + 1)
-            wv = w2v.WordVectors(vectors, word2id, id2word)
-            doc_vectors = wv.fit_documents(df['IDS'])
-            log.step('Word2Vec 학습 완료')
+                # 명사 추출 → 단어 ID (명사 리스트는 메모리를 많이 쓰므로 저장하지 않고 ID 배열만 남긴다)
+                def to_ids(summary: str):
+                    return model.to_ids(nlp.clean(nlp.nouns(summary), stopwords))
+
+                ids = df['SUMMARY'].apply(log.with_progress(to_ids, len(df), '명사 추출'))
+                wv = model.word_vectors()
+                doc_vectors = wv.fit_documents(ids)
+                del ids
 
             # 완성된 데이터로 한 번에 교체
-            self._df, self._word2id, self._id2word = df, word2id, id2word
-            self._okt, self._stopwords, self._wv, self._doc_vectors = okt, set(stopwords), wv, doc_vectors
+            self._df, self._model, self._stopwords = df, model, stopwords
+            self._wv, self._doc_vectors = wv, doc_vectors
             self._status = 'done'
+            gc.collect()
+            log.step(f'최대 메모리 사용량(프로세스 전체, JVM 포함): {log.peak_memory_mb():.1f} MB')
         except Exception as e:
             self._status = 'failed'
             self._error = str(e)
@@ -204,8 +207,7 @@ class Data:
     # 검색어에서 명사만 뽑기 (전처리와 같은 규칙: 두 글자 이상, 불용어 제외)
     # 남는 명사가 없으면(예: "비싸", "법률") 띄어쓰기 단위 단어를 그대로 쓴다.
     def _query_words(self, query: str) -> list[str]:
-        nouns = self._okt.nouns(query) if self._okt is not None else []
-        words = [w for w in nouns if len(w) > 1 and w not in self._stopwords]
+        words = nlp.clean(nlp.nouns(query), self._stopwords)
         return list(dict.fromkeys(words or query.split()))  # 순서 유지하며 중복 제거
 
     def search(self, query: str, limit: int = 20) -> list[dict]:
