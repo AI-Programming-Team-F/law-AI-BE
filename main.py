@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+from contextlib import asynccontextmanager
 from typing import Literal, get_args, get_origin
 
 from fastapi import FastAPI, HTTPException, Query
@@ -12,10 +13,22 @@ from pydantic import BaseModel, Field
 import ai
 from data import data
 
+# 서버 초기화: 법률안 수집·전처리를 백그라운드에서 시작한다 (끝나기 전에도 서버는 바로 요청을 받는다)
+# 수집할 법률안 수는 환경 변수 PREPROCESS_SIZE로 바꿀 수 있다 (기본 20000, 최신순)
+def init() -> None:
+    data.start_preprocess(int(os.getenv('PREPROCESS_SIZE', '20000')))
+
+# 서버가 켜지자마자 init() 실행
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init()
+    yield
+
 app = FastAPI(
+    lifespan=lifespan,
     title='법률안 검색 API',
     description='22대 국회 법률안을 수집해 메모리에 적재하고 검색한다. '
-                '서버 시작 후 `/preprocess`를 먼저 호출해야 검색 결과가 나온다.',
+                '서버가 켜지면 자동으로 데이터를 수집·전처리하며, 끝나기 전까지 검색 결과는 비어 있다.',
     version='0.1.0',
 )
 
@@ -30,13 +43,6 @@ app.add_middleware(
 )
 
 # ---------- 응답 형식 ----------
-
-class PreprocessResponse(BaseModel):
-    started: bool = Field(description='이번 호출로 수집을 새로 시작했는지 (이미 진행 중이면 false)')
-    status: Literal['idle', 'running', 'done', 'failed'] = Field(
-        description='전처리 상태 (idle: 시작 전, running: 진행 중, done: 완료, failed: 실패)')
-    fetched: int = Field(ge=0, le=100, description='요약본 수집 진행률 (단위: %, 0~100)')
-    error: str | None = Field(description='실패했을 때의 오류 메시지 (실패가 아니면 null)')
 
 class BillInfo(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
@@ -161,33 +167,13 @@ def describe(text: str, response: type[BaseModel], request: type[BaseModel] | No
 # ---------- 엔드포인트 ----------
 
 @app.get(
-    '/preprocess',
-    response_model=PreprocessResponse,
-    summary='데이터 수집·전처리 시작',
-    description=describe(
-        '국회 API에서 법률안을 수집하고 전처리(요약본 수집 → 명사 추출 → Word2Vec 학습)한다. '
-        '백그라운드에서 진행되므로 바로 응답한다.\n\n'
-                '- 이미 진행 중이면 새로 시작하지 않고, 현재 진행 상황만 돌려준다 (`started: false`).\n'
-                '- 완료된 뒤 다시 호출하면 처음부터 다시 수집한다. 수집 중에도 기존 데이터로 검색할 수 있다.\n'
-                '- 서버가 재시작되면 데이터가 사라지므로 다시 호출해야 한다.\n'
-                '- 소요 시간은 요약본 수집이 대부분이며, 법률안 1건당 약 0.3초(로컬)~0.8초(Railway) 걸린다. '
-                '(예: 2,000건 약 10~30분, 20,000건 약 1시간 40분~4시간 30분)\n'
-                '- `fetched`가 100%가 된 뒤에도 명사 추출과 Word2Vec 학습이 남아 있으므로, '
-                '완료 여부는 `status`가 `done`인지로 확인한다.',
-        response=PreprocessResponse),
-)
-def preprocess(size: int = Query(20000, ge=1, description='수집할 법률안 수 (최신순)')):
-    started = data.start_preprocess(size)
-    return {'started': started, 'status': data.status, 'fetched': data.fetched, 'error': data.error}
-
-@app.get(
     '/search',
     response_model=SearchResponse,
     summary='법률안 검색',
     description=describe(
         '검색어와 관련된 법률안을 관련도 순으로 돌려준다.\n\n'
                 '- 검색어가 직접 들어 있는 법률안과, 검색어와 의미가 비슷한 법률안(Word2Vec)을 함께 찾는다.\n'
-                '- `/preprocess`가 끝나야 결과가 나온다.',
+                '- 서버가 켜진 뒤 데이터 준비(전처리)가 끝나야 결과가 나온다. 그 전에는 `preprocess`가 false다.',
         response=SearchResponse),
 )
 def search(
@@ -203,7 +189,7 @@ def search(
     description=describe(
         '의안 번호가 정확히 일치하는 법률안 하나를 돌려준다.\n\n'
                 '- 전처리한 데이터에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다.\n'
-                '- `/preprocess` 없이도 사용할 수 있다.',
+                '- 전처리가 끝나기 전에도 사용할 수 있다.',
         response=BillNoResponse),
     responses={404: {'description': '해당 의안 번호의 법률안이 없음'}},
 )
@@ -221,7 +207,7 @@ def search_billno(billno: str = Query(description='의안 번호', examples=['22
         '의안 번호로 법률안의 상세 정보(발의자, 처리 단계별 날짜와 결과, 관련 링크 등)를 돌려준다.\n\n'
         '- 처리 단계 등 바뀔 수 있는 정보를 최신으로 보여 주기 위해, 호출할 때마다 국회 API에서 새로 가져온다.\n'
         '- 날짜 필드는 해당 단계에 아직 이르지 않았으면 null이다.\n'
-        '- `/preprocess` 없이도 사용할 수 있다.',
+        '- 전처리가 끝나기 전에도 사용할 수 있다.',
         response=InfoResponse),
     responses={404: {'description': '해당 의안 번호의 법률안이 없음'}},
 )
@@ -237,9 +223,9 @@ def info(billno: str = Query(description='의안 번호', examples=['2222564']))
     summary='법률안 AI 요약',
     description=describe(
         '법률안의 제안이유 및 주요내용을 AI로 짧고 쉽게 요약한다.\n\n'
-                '주어진 bill_no가 preprocess로 가져온 데이터 중에 있으면 이를 활용하고, 아니면 국회 API로 따로 호출 후 요약한다.\n\n'
+                '주어진 bill_no가 전처리한 데이터 중에 있으면 이를 활용하고, 아니면 국회 API로 따로 호출 후 요약한다.\n\n'
                 '같은 내용에는 같은 요약(100자 미만)을 돌려주도록 설계되어 있다. (temperature=0, 무조건 같지 않을 수도 있음)\n\n'
-                '`/preprocess` 없이도 사용할 수 있다.',
+                '전처리가 끝나기 전에도 사용할 수 있다.',
         response=SummaryResponse),
     responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
                502: {'description': 'AI 요청 실패'}},
@@ -263,7 +249,7 @@ def summary(bill_no: str = Query(description='의안 번호', examples=['2222564
                 '- 각 원소는 유사한 주제에 대한 두 법률안의 차이이다. '
                 '`A`는 그 주제에서 법률안 A의 내용, `B`는 법률안 B의 내용이다.\n'
                 '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
-                '- `/preprocess` 없이도 사용할 수 있다.',
+                '- 전처리가 끝나기 전에도 사용할 수 있다.',
         response=CompareResponse),
     responses={400: {'description': '같은 법률안끼리 비교함'},
                404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
@@ -296,7 +282,7 @@ def compare(
                 '기준의 종류와 개수(1~4개)는 법률안마다 다르다. (예: 주거 형태 → 월세/전세/자가)\n'
                 '- `multiple`이 false인 기준은 하나만, true인 기준은 여러 개를 고를 수 있다.\n'
                 '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
-                '- `/preprocess` 없이도 사용할 수 있다.',
+                '- 전처리가 끝나기 전에도 사용할 수 있다.',
         response=ProfileResponse),
     responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
                502: {'description': 'AI 요청 실패'}},
@@ -320,7 +306,7 @@ def profile(bill_no: str = Query(description='의안 번호', examples=['2222564
                 '- 프로필은 `/profile` 응답에서 고른 값을 그대로 보내면 된다. 아무것도 고르지 않아도 된다.\n'
                 '- `changes`의 각 원소는 `[바뀌는 것, 지금, 법안이 적용되면]` 형태이다.\n'
                 '- 같은 법률안·같은 프로필에는 항상 같은 결과를 돌려준다.\n'
-                '- `/preprocess` 없이도 사용할 수 있다.',
+                '- 전처리가 끝나기 전에도 사용할 수 있다.',
         response=HappenResponse, request=HappenRequest),
     responses={404: {'description': '해당 법률안이 없거나 요약본이 아직 등록되지 않음'},
                502: {'description': 'AI 요청 실패'}},
