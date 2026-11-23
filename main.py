@@ -40,6 +40,7 @@ class PreprocessResponse(BaseModel):
 
 class BillInfo(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
+    BILL_ID: str | None = Field(description='의안 ID (국회 시스템 내부 고유 ID, 예: PRC_52237568E09747118402679FEDA8B0)')
     BILL_NAME: str = Field(description='법률안 이름')
     COMMITTEE: str | None = Field(description='소관위원회 (아직 회부되지 않았으면 null)')
     PROC_RESULT: str | None = Field(description='본회의 심의 결과 (예: 원안가결, 수정가결, 대안반영폐기, 철회). 아직 처리 전이면 null')
@@ -47,6 +48,30 @@ class BillInfo(BaseModel):
 
 class Bill(BillInfo):
     SCORE: float = Field(ge=0, le=1, description='검색어와의 관련도 (0~1, 높을수록 관련 있음)')
+
+class InfoResponse(BaseModel):
+    BILL_NO: str = Field(description='의안 번호')
+    BILL_ID: str | None = Field(description='의안 ID (국회 시스템 내부 고유 ID)')
+    BILL_NAME: str = Field(description='법률안 이름')
+    PROPOSER: str | None = Field(description='제안자 (예: 이주영의원 등 10인)')
+    RST_PROPOSER: str | None = Field(description='대표발의 의원')
+    PUBL_PROPOSER: list[str] = Field(description='공동발의 의원 목록')
+    PROPOSE_DT: str | None = Field(description='제안일 (YYYY-MM-DD)')
+    COMMITTEE: str | None = Field(description='소관위원회 (아직 회부되지 않았으면 null)')
+    COMMITTEE_DT: str | None = Field(description='소관위원회 회부일')
+    CMT_PRESENT_DT: str | None = Field(description='소관위원회 상정일')
+    CMT_PROC_DT: str | None = Field(description='소관위원회 처리일')
+    CMT_PROC_RESULT_CD: str | None = Field(description='소관위원회 처리 결과 (예: 원안가결, 대안반영폐기)')
+    LAW_SUBMIT_DT: str | None = Field(description='법제사법위원회(체계·자구 심사) 회부일')
+    LAW_PRESENT_DT: str | None = Field(description='법제사법위원회 상정일')
+    LAW_PROC_DT: str | None = Field(description='법제사법위원회 처리일')
+    LAW_PROC_RESULT_CD: str | None = Field(description='법제사법위원회 처리 결과')
+    PROC_DT: str | None = Field(description='본회의 의결일')
+    PROC_RESULT: str | None = Field(description='본회의 심의 결과 (예: 원안가결, 수정가결, 대안반영폐기, 철회). 아직 처리 전이면 null')
+    SUMMARY: str | None = Field(description='요약본 (제안이유 및 주요내용, 아직 등록되지 않았으면 null)')
+    DETAIL_LINK: str | None = Field(description='국회 의안정보시스템의 법률안 상세 페이지 링크')
+    MEMBER_LIST: str | None = Field(description='국회 의안정보시스템의 공동발의자 목록 페이지 링크')
+    # 날짜 필드는 해당 단계에 아직 이르지 않았으면 null
 
 class SummaryResponse(BaseModel):
     bill_no: str = Field(description='의안 번호')
@@ -187,6 +212,24 @@ def search_billno(billno: str = Query(description='의안 번호', examples=['22
     if bill is None:
         raise HTTPException(404, '해당 의안 번호의 법률안이 없습니다.')
     return {'preprocess': data.is_ready, 'data': bill}
+
+@app.get(
+    '/info',
+    response_model=InfoResponse,
+    summary='법률안 상세 정보',
+    description=describe(
+        '의안 번호로 법률안의 상세 정보(발의자, 처리 단계별 날짜와 결과, 관련 링크 등)를 돌려준다.\n\n'
+        '- 처리 단계 등 바뀔 수 있는 정보를 최신으로 보여 주기 위해, 호출할 때마다 국회 API에서 새로 가져온다.\n'
+        '- 날짜 필드는 해당 단계에 아직 이르지 않았으면 null이다.\n'
+        '- `/preprocess` 없이도 사용할 수 있다.',
+        response=InfoResponse),
+    responses={404: {'description': '해당 의안 번호의 법률안이 없음'}},
+)
+def info(billno: str = Query(description='의안 번호', examples=['2222564'])):
+    result = data.get_info(billno.strip())
+    if result is None:
+        raise HTTPException(404, '해당 의안 번호의 법률안이 없습니다.')
+    return result
 
 @app.get(
     '/summary',

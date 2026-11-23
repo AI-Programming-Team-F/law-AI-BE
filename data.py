@@ -105,7 +105,7 @@ class Data:
             # (바뀔 수 있는 정보인 COMMITTEE, PROC_RESULT는 저장소가 아니라 방금 받은 목록에서 가져온다)
             listed = pandas.DataFrame(bills).drop_duplicates('BILL_NO')  # 수집 중 새 법안이 끼어들면 페이지가 밀려 중복될 수 있음
             del bills
-            df = listed[['BILL_NAME', 'BILL_NO', 'COMMITTEE', 'PROC_RESULT']].copy()
+            df = listed[['BILL_NAME', 'BILL_NO', 'BILL_ID', 'COMMITTEE', 'PROC_RESULT']].copy()
             stable = listed.set_index('BILL_NO').to_dict('index')
             del listed
 
@@ -180,7 +180,7 @@ class Data:
     # 의안 번호로 법률안 하나 찾기 (없으면 None)
     # 메모리에 있으면 그대로 쓰고, 없으면 국회 API에서 바로 가져온다. (요약본이 아직 없으면 SUMMARY는 None)
     # 요약본은 저장소에 있으면 저장소 것을 쓴다.
-    BILL_COLUMNS = ['BILL_NO', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY']
+    BILL_COLUMNS = ['BILL_NO', 'BILL_ID', 'BILL_NAME', 'COMMITTEE', 'PROC_RESULT', 'SUMMARY']
 
     def get_bill(self, bill_no: str) -> dict | None:
         df = self._df
@@ -195,6 +195,24 @@ class Data:
         record = store.load(bill_no)
         bill['SUMMARY'] = record['SUMMARY'] if record is not None else prep.get_summary(bill_no)
         return {column: bill.get(column) for column in self.BILL_COLUMNS}
+
+    # 의안 번호로 법률안 상세 정보 (없으면 None)
+    # 바뀔 수 있는 정보(처리 단계, 날짜 등)를 최신으로 보여 주기 위해 메모리가 아니라 항상 국회 API에서 새로 가져온다.
+    # 요약본만 저장소에 있으면 저장소 것을 쓴다.
+    INFO_COLUMNS = ['BILL_NO', 'BILL_ID', 'BILL_NAME', 'PROPOSER', 'RST_PROPOSER', 'PROPOSE_DT',
+                    'COMMITTEE', 'COMMITTEE_DT', 'CMT_PRESENT_DT', 'CMT_PROC_DT', 'CMT_PROC_RESULT_CD',
+                    'LAW_SUBMIT_DT', 'LAW_PRESENT_DT', 'LAW_PROC_DT', 'LAW_PROC_RESULT_CD',
+                    'PROC_DT', 'PROC_RESULT', 'DETAIL_LINK', 'MEMBER_LIST']
+
+    def get_info(self, bill_no: str) -> dict | None:
+        bill = prep.get_bill(22, bill_no)
+        if bill is None:
+            return None
+        info = {column: bill.get(column) for column in self.INFO_COLUMNS}
+        info['PUBL_PROPOSER'] = [name.strip() for name in (bill.get('PUBL_PROPOSER') or '').split(',') if name.strip()]
+        record = store.load(bill_no)
+        info['SUMMARY'] = record['SUMMARY'] if record is not None else prep.get_summary(bill_no)
+        return info
 
     # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
     # - 검색어 단어: Okt로 뽑은 명사 (예: "월세가 너무 비싸" → ["월세"])
