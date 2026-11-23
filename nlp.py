@@ -33,9 +33,11 @@ def nouns(text: str | None) -> list[str]:
 # - 명사만 이어진 단어는 붙인 채로 쓴다 (예: "자영업자" → "자영업자", Okt는 "자영"+"업자"로 쪼갬)
 # - 뒤에 붙은 조사·어미는 뗀다 (예: "월세가" → "월세")
 # - 단어 전체가 동사로 분류돼도 명사처럼 쓰이는 말은 그대로 쓴다 (예: "돌봄", "감면")
+# - 영문·숫자도 핵심어로 쓴다 (예: "AI", "5G" — Okt는 명사가 아닌 Alpha/Number로 분류함)
 # - 부사·형용사 등은 버린다 (예: "너무", "비싸")
 # - 그 밖의 경우(예: "보호하는")는 그 안의 명사만 쓴다
 _TRAILING_TAGS = {'Josa', 'Eomi', 'Punctuation', 'Suffix'}
+_NOUN_LIKE_TAGS = {'Noun', 'Alpha', 'Number', 'Foreign'}
 
 def keywords(text: str | None) -> list[str]:
     okt = _get_okt()
@@ -47,12 +49,12 @@ def keywords(text: str | None) -> list[str]:
         if not morphs:
             continue
         tags = {tag for _, tag in morphs}
-        if tags == {'Noun'}:
+        if tags <= _NOUN_LIKE_TAGS:
             words.append(''.join(word for word, _ in morphs))
         elif len(morphs) == 1 and morphs[0][1] == 'Verb' and morphs[0][0] == token:
             words.append(token)
         else:
-            words += [word for word, tag in morphs if tag == 'Noun']
+            words += [word for word, tag in morphs if tag in _NOUN_LIKE_TAGS]
     return words
 
 # 학습 데이터의 명사 리스트들로 불용어 목록 만들기 (가장 많이 나온 명사 + 기본 불용어)

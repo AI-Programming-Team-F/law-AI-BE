@@ -216,7 +216,8 @@ class Data:
 
     # ---------- 검색 규칙 ----------
     # 1) 검색어에서 법률안 형식(일부개정법률안 등)을 먼저 떼어 낸다. 형식은 핵심어가 아니라 정렬 조건으로만 쓴다.
-    # 2) 남은 검색어에서 핵심어를 뽑고(nlp.keywords), 전체 법안의 COMMON_RATIO 이상에 나오는 흔한 단어는 뺀다 (전부 빠지면 원래 단어 사용).
+    # 2) 남은 검색어에서 핵심어를 뽑고(nlp.keywords), 일반어(GENERIC_WORDS)와
+    #    전체 법안의 COMMON_RATIO 이상에 나오는 흔한 단어는 뺀다 (전부 빠지면 원래 단어 사용).
     # 3) 단어마다 IDF(드문 단어일수록 큼)로 가중치를 준다.
     #    - 핵심어 포함 비율 = 포함된 단어의 IDF 합 / 전체 IDF 합 (이름이나 요약본 어디든 있으면 포함)
     #    - 키워드 점수     = Σ IDF × (이름에 있으면 2 + 요약본에 있으면 1) / (3 × 전체 IDF 합)
@@ -226,6 +227,9 @@ class Data:
     KEYWORD_WEIGHT = 0.5
     MIN_SIMILARITY = 0.3
     COMMON_RATIO = 0.3
+
+    # 법안이면 거의 다 붙는 일반어 — 비율과 관계없이 핵심어에서 뺀다 (드물게 나와도 주제와는 무관하므로)
+    GENERIC_WORDS = frozenset(['법률안', '법안', '법률', '법령', '개정안', '개정', '조항', '규정', '의안'])
 
     # 법률안 형식: (형식 이름, 검색어에서 알아볼 표현들 — 긴 것부터)
     BILL_TYPES = [
@@ -267,13 +271,14 @@ class Data:
         if not words:
             words, bill_type = self._query_words(query), None
 
-        # 단어마다 이름/요약본에 들어 있는지
-        in_name = {w: df['BILL_NAME'].str.contains(w, regex=False) for w in words}
-        in_summary = {w: df['SUMMARY'].str.contains(w, regex=False) for w in words}
+        # 단어마다 이름/요약본에 들어 있는지 (영문은 대소문자 구분 없이: AI = ai)
+        in_name = {w: df['BILL_NAME'].str.contains(w, case=False, regex=False) for w in words}
+        in_summary = {w: df['SUMMARY'].str.contains(w, case=False, regex=False) for w in words}
         doc_freq = {w: int((in_name[w] | in_summary[w]).sum()) for w in words}
 
-        # 2) 흔한 단어 빼기
-        terms = [w for w in words if doc_freq[w] < self.COMMON_RATIO * len(df)] or words
+        # 2) 일반어와 흔한 단어 빼기 (전부 빠지면 원래 단어 사용)
+        terms = [w for w in words
+                 if w not in self.GENERIC_WORDS and doc_freq[w] < self.COMMON_RATIO * len(df)] or words
 
         # 3) IDF 가중치, 핵심어 포함 비율, 키워드 점수 (모두 0~1)
         idf = {t: numpy.log((len(df) + 1) / (doc_freq[t] + 1)) + 1 for t in terms}
