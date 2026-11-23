@@ -53,7 +53,8 @@ class BillInfo(BaseModel):
     SUMMARY: str | None = Field(description='요약본 (제안이유 및 주요내용, 아직 등록되지 않았으면 null)')
 
 class Bill(BillInfo):
-    SCORE: float = Field(ge=0, le=1, description='검색어와의 관련도 (0~1, 높을수록 관련 있음)')
+    SCORE: float = Field(ge=0, le=1, description='검색어와의 관련도 (0~1, 높을수록 관련 있음). '
+                                                  '결과는 핵심어 포함 비율이 먼저 정렬 기준이므로, SCORE가 더 높은 법안이 뒤에 있을 수 있다')
 
 class InfoResponse(BaseModel):
     BILL_NO: str = Field(description='의안 번호')
@@ -138,7 +139,7 @@ class CompareResponse(BaseModel):
 
 class SearchResponse(BaseModel):
     preprocess: bool = Field(description='검색할 데이터가 준비되었는지 (false면 data는 항상 빈 리스트)')
-    data: list[Bill] = Field(description='검색 결과 (관련도 높은 순)')
+    data: list[Bill] = Field(description='검색 결과 (핵심어 포함 비율 → 법률안 형식 일치 → SCORE → 최신순으로 정렬)')
 
 class BillNoResponse(BaseModel):
     preprocess: bool = Field(description='전처리한 데이터가 준비되었는지 (false여도 국회 API에서 바로 찾음)')
@@ -171,13 +172,27 @@ def describe(text: str, response: type[BaseModel], request: type[BaseModel] | No
     response_model=SearchResponse,
     summary='법률안 검색',
     description=describe(
-        '검색어와 관련된 법률안을 관련도 순으로 돌려준다.\n\n'
-                '- 검색어가 직접 들어 있는 법률안과, 검색어와 의미가 비슷한 법률안(Word2Vec)을 함께 찾는다.\n'
-                '- 서버가 켜진 뒤 데이터 준비(전처리)가 끝나야 결과가 나온다. 그 전에는 `preprocess`가 false다.',
+        '검색어와 관련된 법률안을 돌려준다. 검색어가 직접 들어 있는 법률안과, '
+        '검색어와 의미가 비슷한 법률안(Word2Vec)을 함께 찾는다.\n\n'
+                '**핵심어**\n'
+                '- 검색어에서 핵심어를 뽑는다. 조사·부사·형용사는 버린다. (예: "월세가 너무 비싸" → `월세`)\n'
+                '- 전체 법안의 30% 이상에 나오는 흔한 단어는 핵심어에서 뺀다. (전부 빠지면 원래 단어를 쓴다)\n'
+                '- 드문 핵심어일수록 비중이 크다. (IDF 가중치)\n\n'
+                '**법률안 형식**\n'
+                '- 검색어에 일부개정법률안, 전부개정법률안, 폐지법률안, 제정법률안(또는 줄임말 일부개정, 전부개정)이 있으면 '
+                '핵심어로 쓰지 않고, 제목이 그 형식인 법률안을 먼저 보여 준다. (예: "보안 일부개정법률안")\n'
+                '- 제정법률안은 제목에 "개정법률안", "폐지법률안"이 없는 법률안이다.\n\n'
+                '**정렬 순서**\n'
+                '1. 핵심어 포함 비율 (핵심어를 많이, 특히 드문 핵심어를 포함할수록 앞)\n'
+                '2. 제목이 검색어의 법률안 형식과 같은지 (형식을 입력했을 때만)\n'
+                '3. `SCORE`\n'
+                '4. 최신순\n\n'
+                '핵심어가 하나도 없는 법률안은 의미가 충분히 비슷할 때만 맨 뒤에 나온다.\n\n'
+                '서버가 켜진 뒤 데이터 준비(전처리)가 끝나야 결과가 나온다. 그 전에는 `preprocess`가 false다.',
         response=SearchResponse),
 )
 def search(
-    query: str = Query(description='검색어', examples=['소방']),
+    query: str = Query(description='검색어 (단어 여러 개, 문장, 법률안 형식 포함 가능)', examples=['보안 일부개정법률안']),
     limit: int = Query(20, ge=1, le=100, description='최대 결과 수'),
 ):
     return {'preprocess': data.is_ready, 'data': data.search(query, limit)}

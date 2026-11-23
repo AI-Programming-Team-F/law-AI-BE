@@ -214,18 +214,46 @@ class Data:
         info['SUMMARY'] = record['SUMMARY'] if record is not None else prep.get_summary(bill_no)
         return info
 
-    # 최종 점수 = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수 (0~1)
-    # - 검색어 단어: Okt로 뽑은 명사 (예: "월세가 너무 비싸" → ["월세"])
-    # - 키워드 점수: 검색어 단어가 법률안 이름에 있으면 2, 요약본에 있으면 1을 더한 뒤 최대값(3 × 단어 수)으로 나눔
-    # - 의미 점수: Word2Vec으로 만든 검색어 벡터와 법률안 벡터의 코사인 유사도 (음수는 0)
-    # 키워드가 하나도 없는 법안은 의미 점수가 MIN_SIMILARITY 이상일 때만 결과에 넣는다.
+    # ---------- 검색 규칙 ----------
+    # 1) 검색어에서 법률안 형식(일부개정법률안 등)을 먼저 떼어 낸다. 형식은 핵심어가 아니라 정렬 조건으로만 쓴다.
+    # 2) 남은 검색어에서 핵심어를 뽑고(nlp.keywords), 전체 법안의 COMMON_RATIO 이상에 나오는 흔한 단어는 뺀다 (전부 빠지면 원래 단어 사용).
+    # 3) 단어마다 IDF(드문 단어일수록 큼)로 가중치를 준다.
+    #    - 핵심어 포함 비율 = 포함된 단어의 IDF 합 / 전체 IDF 합 (이름이나 요약본 어디든 있으면 포함)
+    #    - 키워드 점수     = Σ IDF × (이름에 있으면 2 + 요약본에 있으면 1) / (3 × 전체 IDF 합)
+    # 4) SCORE = KEYWORD_WEIGHT × 키워드 점수 + (1 - KEYWORD_WEIGHT) × 의미 점수(Word2Vec 코사인 유사도)  → 0~1
+    # 5) 정렬: 핵심어 포함 비율 → (검색어에 형식이 있으면) 제목에 그 형식이 있는지 → SCORE → 최신순
+    #    핵심어가 하나도 없는 법안은 의미 점수가 MIN_SIMILARITY 이상일 때만 맨 뒤에 채운다.
     KEYWORD_WEIGHT = 0.5
     MIN_SIMILARITY = 0.3
+    COMMON_RATIO = 0.3
 
-    # 검색어에서 명사만 뽑기 (전처리와 같은 규칙: 두 글자 이상, 불용어 제외)
-    # 남는 명사가 없으면(예: "비싸", "법률") 띄어쓰기 단위 단어를 그대로 쓴다.
+    # 법률안 형식: (형식 이름, 검색어에서 알아볼 표현들 — 긴 것부터)
+    BILL_TYPES = [
+        ('일부개정법률안', ['일부개정법률안', '일부개정']),
+        ('전부개정법률안', ['전부개정법률안', '전부개정']),
+        ('폐지법률안', ['폐지법률안']),
+        ('제정법률안', ['제정법률안']),
+    ]
+
+    # 검색어에서 법률안 형식 떼어 내기 → (형식을 뺀 검색어, 형식 이름 또는 None)
+    def _split_bill_type(self, query: str) -> tuple[str, str | None]:
+        for bill_type, expressions in self.BILL_TYPES:
+            for expression in expressions:
+                if expression in query:
+                    return query.replace(expression, ' '), bill_type
+        return query, None
+
+    # 제목이 그 형식인지 (제정법률안은 이름이 개정/폐지 없이 "~법률안", "~법안"으로 끝남)
+    @staticmethod
+    def _has_bill_type(names: pandas.Series, bill_type: str) -> pandas.Series:
+        if bill_type == '제정법률안':
+            return ~names.str.contains('개정법률안', regex=False) & ~names.str.contains('폐지법률안', regex=False)
+        return names.str.contains(bill_type, regex=False)
+
+    # 검색어에서 핵심어 뽑기 (nlp.keywords 규칙 + 두 글자 이상, 불용어 제외)
+    # 남는 단어가 없으면(예: "비싸", "법률") 띄어쓰기 단위 단어를 그대로 쓴다.
     def _query_words(self, query: str) -> list[str]:
-        words = nlp.clean(nlp.nouns(query), self._stopwords)
+        words = nlp.clean(nlp.keywords(query), self._stopwords)
         return list(dict.fromkeys(words or query.split()))  # 순서 유지하며 중복 제거
 
     def search(self, query: str, limit: int = 20) -> list[dict]:
@@ -233,26 +261,43 @@ class Data:
         if df is None or not query.strip():
             return []
 
-        terms = self._query_words(query)
+        # 1) 형식 떼어 내기 (형식만 입력했으면 원래 검색어로 찾음)
+        rest, bill_type = self._split_bill_type(query)
+        words = self._query_words(rest) if rest.strip() else []
+        if not words:
+            words, bill_type = self._query_words(query), None
 
-        # 키워드 점수 (0~1)
-        keyword = pandas.Series(0.0, index=df.index)
-        for term in terms:
-            keyword += df['BILL_NAME'].str.contains(term, regex=False) * 2
-            keyword += df['SUMMARY'].str.contains(term, regex=False) * 1
-        keyword /= 3 * len(terms)
+        # 단어마다 이름/요약본에 들어 있는지
+        in_name = {w: df['BILL_NAME'].str.contains(w, regex=False) for w in words}
+        in_summary = {w: df['SUMMARY'].str.contains(w, regex=False) for w in words}
+        doc_freq = {w: int((in_name[w] | in_summary[w]).sum()) for w in words}
+
+        # 2) 흔한 단어 빼기
+        terms = [w for w in words if doc_freq[w] < self.COMMON_RATIO * len(df)] or words
+
+        # 3) IDF 가중치, 핵심어 포함 비율, 키워드 점수 (모두 0~1)
+        idf = {t: numpy.log((len(df) + 1) / (doc_freq[t] + 1)) + 1 for t in terms}
+        total_idf = sum(idf.values())
+        coverage = sum(idf[t] * (in_name[t] | in_summary[t]) for t in terms) / total_idf
+        keyword = sum(idf[t] * (in_name[t] * 2 + in_summary[t] * 1) for t in terms) / (3 * total_idf)
 
         # 의미 점수 (0~1)
         semantic = pandas.Series(0.0, index=df.index)
-        query_vector = wv.query_vector(terms) if wv is not None else None
+        # (단어 사전은 Okt 명사로 만들었으므로 "자영업자" 같은 붙인 단어 대신 명사 조각도 함께 넣는다)
+        vector_words = terms + nlp.clean(nlp.nouns(rest if bill_type else query), self._stopwords)
+        query_vector = wv.query_vector(vector_words) if wv is not None else None
         if query_vector is not None:
             semantic = pandas.Series(numpy.clip(doc_vectors @ query_vector, 0, 1), index=df.index)
 
+        # 4) 최종 점수
         score = self.KEYWORD_WEIGHT * keyword + (1 - self.KEYWORD_WEIGHT) * semantic
-        matched = (keyword > 0) | (semantic >= self.MIN_SIMILARITY)
 
-        result = df.assign(SCORE=score.round(4))[matched]
-        result = result.sort_values('SCORE', ascending=False, kind='stable').head(limit)  # 같은 점수면 최신순 유지
+        # 5) 정렬
+        type_match = (self._has_bill_type(df['BILL_NAME'], bill_type) if bill_type
+                      else pandas.Series(False, index=df.index))
+        result = df.assign(SCORE=score.round(4), _COVERAGE=coverage.round(6), _TYPE=type_match)
+        result = result[(coverage > 0) | (semantic >= self.MIN_SIMILARITY)]
+        result = result.sort_values(['_COVERAGE', '_TYPE', 'SCORE'], ascending=False, kind='stable').head(limit)
         return _to_records(result[self.BILL_COLUMNS + ['SCORE']])
 
 
