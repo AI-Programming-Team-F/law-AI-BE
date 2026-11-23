@@ -98,10 +98,10 @@ class HappenResponse(BaseModel):
 class CompareResponse(BaseModel):
     a_bill_no: str = Field(description='비교할 법률안 A의 의안 번호')
     b_bill_no: str = Field(description='비교할 법률안 B의 의안 번호')
-    differences: list[tuple[str, str]] = Field(
-        description='두 법률안의 차이점. 각 원소는 [A, B] 형태이며, 유사한 주제에 대한 '
-                    '법률안 A의 내용과 법률안 B의 내용을 나란히 표시한다. (개괄식)',
-        examples=[[['소방공무원 인건비에 대한 국가 재정부담 확대를 목표로 함',
+    differences: list[tuple[str, str, str]] = Field(
+        description='두 법률안의 차이점. 각 원소는 [비교 항목, A, B] 형태이며, 비교 항목(무엇을 비교하는지)과 '
+                    '그 항목에 대한 법률안 A의 내용과 법률안 B의 내용을 나란히 표시한다. (A, B는 개괄식)',
+        examples=[[['재정 확충 방식', '소방공무원 인건비에 대한 국가 재정부담 확대를 목표로 함',
                     '소방발전기금 신설을 통한 소방재정 확충을 목표로 함']]],
     )
 
@@ -216,7 +216,7 @@ def summary(bill_no: str = Query(description='의안 번호', examples=['2222564
     summary='두 법률안 AI 비교',
     description=describe(
         '두 법률안의 제안이유 및 주요내용을 AI로 비교해, 차이점을 리스트로 돌려준다.\n\n'
-                '- `differences`의 각 원소는 `[A, B]` 형태로 표시한다.\n'
+                '- `differences`의 각 원소는 `[비교 항목, A, B]` 형태로 표시한다. (예: `["유효기간", "4년 연장", "1년 연장"]`)\n'
                 '- 각 원소는 유사한 주제에 대한 두 법률안의 차이이다. '
                 '`A`는 그 주제에서 법률안 A의 내용, `B`는 법률안 B의 내용이다.\n'
                 '- 같은 요청에는 항상 같은 결과를 돌려준다.\n'
